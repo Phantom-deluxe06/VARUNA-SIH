@@ -2,14 +2,15 @@
 
 import React, { useState } from "react";
 import MarineMap from "@/components/MarineMap";
-import type { MarineCoordinates } from "@/types/marine";
+import QueryPanel from "@/components/QueryPanel";
 import { DEMO_HAZARD_POINTS } from "@/data/mockMarineData";
 
 export default function Home() {
-  const [selectedCoord, setSelectedCoord] = useState<MarineCoordinates | null>({
-    latitude: 9.28,
-    longitude: 79.31,
-  });
+  // Parent state holding selected map coordinates
+  const [selectedLocation, setSelectedLocation] = useState<{
+    lat: number;
+    lon: number;
+  } | null>(null);
 
   const [activeAlert, setActiveAlert] = useState<string | null>(
     "Active Wave Advisory: 2.8m - 3.2m swells reported near Palk Strait shallow channels."
@@ -47,10 +48,11 @@ export default function Home() {
     },
   ];
 
-  const handleLocationSelect = (coords: MarineCoordinates) => {
-    setSelectedCoord(coords);
+  // Callback handler for MarineMap coordinate selection
+  const handleLocationSelect = (location: { lat: number; lon: number }) => {
+    setSelectedLocation(location);
     setActiveAlert(
-      `Target selected at ${coords.latitude.toFixed(4)}°N, ${coords.longitude.toFixed(4)}°E. Analyzing bathymetry & proximity to IMBL...`
+      `Location probed at ${location.lat.toFixed(4)}° N, ${location.lon.toFixed(4)}° E. Active in Query Panel.`
     );
   };
 
@@ -100,7 +102,6 @@ export default function Home() {
         {/* Primary Interactive Maritime GIS Map Canvas */}
         <main className="flex-1 relative h-full w-full overflow-hidden p-2 bg-slate-950">
           <MarineMap
-            selectedLocation={selectedCoord}
             onLocationSelect={handleLocationSelect}
             className="h-full w-full shadow-2xl"
           />
@@ -119,53 +120,8 @@ export default function Home() {
             </div>
           )}
 
-          {/* Selected Coordinate Inspector */}
-          <div className="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/60 flex flex-col gap-2 shadow-lg">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                Location Inspector
-              </span>
-              <span className="text-[10px] text-cyan-400 font-mono">CLICK MAP TO PROBE</span>
-            </div>
-
-            {selectedCoord ? (
-              <div className="space-y-2 text-xs">
-                <div className="grid grid-cols-2 gap-2 font-mono">
-                  <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
-                    <div className="text-[10px] text-slate-400">LATITUDE</div>
-                    <div className="text-cyan-300 font-bold text-sm">
-                      {selectedCoord.latitude.toFixed(4)}° N
-                    </div>
-                  </div>
-                  <div className="bg-slate-900/80 p-2 rounded border border-slate-800">
-                    <div className="text-[10px] text-slate-400">LONGITUDE</div>
-                    <div className="text-cyan-300 font-bold text-sm">
-                      {selectedCoord.longitude.toFixed(4)}° E
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-slate-900/50 p-2.5 rounded border border-slate-800/80 text-[11px] text-slate-300 space-y-1">
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Region:</span>
-                    <span className="font-semibold text-slate-200">Palk Bay & Strait</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">IMBL Buffer:</span>
-                    <span className="text-emerald-400 font-semibold">Clear of Line (3.8 NM)</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Under-Keel Clearance:</span>
-                    <span className="text-amber-300 font-semibold">Adequate (&gt; 4.2m)</span>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="text-center py-4 text-xs text-slate-400 italic">
-                Click anywhere on the map to inspect geographic coordinates.
-              </div>
-            )}
-          </div>
+          {/* Reusable Query Panel Component */}
+          <QueryPanel selectedLocation={selectedLocation} />
 
           {/* Quick Target Presets */}
           <div className="flex flex-col gap-2">
@@ -178,7 +134,7 @@ export default function Home() {
                   key={preset.name}
                   type="button"
                   onClick={() =>
-                    handleLocationSelect({ latitude: preset.lat, longitude: preset.lon })
+                    handleLocationSelect({ lat: preset.lat, lon: preset.lon })
                   }
                   className="text-left p-2.5 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-slate-700/40 hover:border-cyan-500/50 transition-all flex flex-col gap-1 text-xs group"
                 >
@@ -234,3 +190,4 @@ export default function Home() {
     </div>
   );
 }
+
