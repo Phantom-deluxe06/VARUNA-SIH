@@ -77,3 +77,9 @@ body {
     opacity: 0;
   }
 }
+
+/* OSM standard tiles are light-coloured; keep the navy dark theme by
+   inverting only the raster tile layer (markers/overlays are unaffected). */
+.leaflet-tile {
+  filter: brightness(0.6) invert(1) contrast(1.1) hue-rotate(185deg) saturate(0.35);
+}

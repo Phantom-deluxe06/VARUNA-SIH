@@ -1,11 +1,19 @@
 export type UserStatus = "SAFE" | "CAUTION" | "CRITICAL";
 
+export type BearingVector = {
+  from: [number, number];
+  to: [number, number];
+  bearing_degrees: number;
+  distance_km: number;
+};
+
 export type AgentDecision = {
-  active_agent: string;
   status: UserStatus;
-  advisory_tamil: string;
-  advisory_english: string;
+  agent_name: string;
+  advisory_en: string;
+  advisory_ta: string;
   metrics: Record<string, string | number | boolean | null>;
+  bearing_vector: BearingVector | null;
   evidence_trace: string[];
 };
 
@@ -19,17 +27,12 @@ export type MapPoint = {
   status?: UserStatus;
 };
 
-export type BearingVector = {
-  from: [number, number];
-  to: [number, number];
-  bearing_degrees: number;
-  distance_km: number;
-};
-
 export const IMBL_PALK_BAY: [number, number][] = [
-  [9.0, 79.2],
-  [9.5, 79.6],
-  [10.0, 79.9],
+  [10.08, 79.86],
+  [9.98, 79.58],
+  [9.67, 79.38],
+  [9.16, 79.53],
+  [9.0, 79.32],
 ];
 
 export const PORT_CHENNAI: MapPoint = {

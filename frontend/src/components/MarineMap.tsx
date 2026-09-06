@@ -75,14 +75,11 @@ export default function MarineMap({ points, bearing, focus }: MarineMapProps) {
       attributionControl
     >
       <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png"
-        subdomains={["a", "b", "c", "d"]}
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
-      />
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png"
-        subdomains={["a", "b", "c", "d"]}
-        attribution=""
+        key="osm-standard"
+        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        subdomains={["a", "b", "c"]}
+        maxZoom={19}
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       />
       <Recenter center={center} zoomKey={`${center[0]},${center[1]}`} />
 

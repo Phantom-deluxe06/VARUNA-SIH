@@ -1,3 +1,10 @@
 fastapi
 uvicorn
 pydantic
+
+# --- Satellite EO & Raster Engine (lazily-imported scientific stack) -----------
+numpy
+xarray
+netCDF4
+scikit-learn
+joblib

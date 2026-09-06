@@ -114,10 +114,11 @@ export default function CommandCenter() {
         });
         if (!res.ok) throw new Error(`Engine returned ${res.status}`);
         const data: AgentDecision = await res.json();
+        console.log("LIVE ENGINE RESULT:", data);
         setDecision(data);
         mapKeyRef.current += 1;
         forceRerender((n) => n + 1);
-        if (data.active_agent.includes("Port")) setFocus([PORT_CHENNAI.lat, PORT_CHENNAI.lon]);
+        if (data.agent_name.toUpperCase().includes("PORT")) setFocus([PORT_CHENNAI.lat, PORT_CHENNAI.lon]);
         else if (typeof data.metrics.target_lat === "number" && typeof data.metrics.target_lon === "number")
           setFocus([coords.lat, coords.lon]);
         else setFocus([coords.lat, coords.lon]);
@@ -271,15 +272,15 @@ export default function CommandCenter() {
             <div className="rounded-xl border border-slate-800 bg-navy-900/60 p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  {decision.active_agent.includes("Port") ? (
+                  {decision.agent_name.toUpperCase().includes("PORT") ? (
                     <Anchor className="h-4 w-4 text-ocean-400" />
-                  ) : decision.active_agent.includes("Hazard") ? (
+                  ) : decision.agent_name.toUpperCase().includes("HAZARD") ? (
                     <AlertTriangle className="h-4 w-4 text-amber-400" />
                   ) : (
                     <Ship className="h-4 w-4 text-ocean-400" />
                   )}
                   <h3 className="text-xs font-bold uppercase tracking-widest text-slate-300">
-                    {decision.active_agent}
+                    {decision.agent_name}
                   </h3>
                 </div>
                 {(() => {
@@ -297,14 +298,14 @@ export default function CommandCenter() {
               {/* English advisory */}
               <div className="rounded-lg border border-slate-700/60 bg-navy-950 p-3">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Advisory</p>
-                <p className="mt-1 text-sm leading-relaxed text-slate-200">{decision.advisory_english}</p>
+                <p className="mt-1 text-sm leading-relaxed text-slate-200">{decision.advisory_en}</p>
               </div>
 
               {/* Tamil vernacular */}
               <div className="mt-2 rounded-lg border border-ocean-800/50 bg-ocean-950/30 p-3">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-ocean-500">வட்டார ஆலோசனை</p>
                 <p className="mt-1 text-sm leading-relaxed text-ocean-100" lang="ta">
-                  {decision.advisory_tamil}
+                  {decision.advisory_ta}
                 </p>
               </div>
 
@@ -420,6 +421,24 @@ function useMemoBuildBearing(
   coords: { lat: number; lon: number },
 ): BearingVector | null {
   if (!decision) return null;
+
+  // Preferred: structured bearing_vector returned by the backend contract.
+  if (
+    decision.bearing_vector &&
+    decision.bearing_vector.from &&
+    decision.bearing_vector.to &&
+    typeof decision.bearing_vector.bearing_degrees === "number" &&
+    typeof decision.bearing_vector.distance_km === "number"
+  ) {
+    return {
+      from: decision.bearing_vector.from,
+      to: decision.bearing_vector.to,
+      bearing_degrees: decision.bearing_vector.bearing_degrees,
+      distance_km: decision.bearing_vector.distance_km,
+    };
+  }
+
+  // Fallback: legacy metrics-based hotspot payload.
   const hasHotspot =
     typeof decision.metrics.target_lat === "number" &&
     typeof decision.metrics.target_lon === "number" &&

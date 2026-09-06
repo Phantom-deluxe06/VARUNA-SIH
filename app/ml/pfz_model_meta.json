@@ -1,0 +1,16 @@
+{
+  "trained_at_utc": "2026-09-06T05:26:52.236241+00:00",
+  "estimator": "GradientBoostingClassifier",
+  "n_samples": 40000,
+  "feature_names": [
+    "sst",
+    "chlorophyll",
+    "sst_gradient",
+    "chl_gradient",
+    "distance_to_shore"
+  ],
+  "accuracy": 0.9191,
+  "roc_auc": 0.9803,
+  "f1_pfz": 0.9234,
+  "positive_rate": 0.5269
+}
