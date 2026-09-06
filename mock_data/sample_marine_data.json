@@ -1,0 +1,27 @@
+{
+  "coastal_weather": {
+    "wind_speed_knots": 14,
+    "wave_height_m": 1.2,
+    "wave_period_s": 8,
+    "gust_knots": 18
+  },
+  "fishery_hotspot": {
+    "target_lat": 9.28,
+    "target_lon": 79.31,
+    "bearing_degrees": 115,
+    "distance_km": 32,
+    "species": "Tuna / Mackerel"
+  },
+  "port_chennai": {
+    "channel_depth_m": 14.5,
+    "current_tide_m": 1.2,
+    "threshold_min_ukc_m": 1.5
+  },
+  "imbl_palk_bay": {
+    "polygon_coordinates": [
+      [9.0, 79.2],
+      [9.5, 79.6],
+      [10.0, 79.9]
+    ]
+  }
+}
