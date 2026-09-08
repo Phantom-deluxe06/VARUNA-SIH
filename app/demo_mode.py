@@ -102,6 +102,8 @@ def demo_decision(kind: str) -> AgentDecisionResponse:
         "wind_speed_knots": entry.get("wind_speed_knots", 18),
         "nearest_imbl_distance_nm": entry.get("imbl_distance_nm", 8.4),
         "demo_mode": True,
+        "source": "DEMO_FALLBACK",
+        "sea_state_source": "DEMO_FALLBACK",
     }
     bearing_vector = None
     if "bearing" in entry and "distance_nm" in entry:

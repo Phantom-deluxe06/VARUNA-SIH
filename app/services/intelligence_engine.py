@@ -56,14 +56,17 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
     "border": [
         "border", "imbl", "boundary", "international maritime", "lanka",
         "maritime boundary", "territorial", "geofence", "restricted zone",
+        "எல்லை", "இலங்கை", "கடல் எல்லை",
     ],
     "fishing": [
         "fish", "fishing", "fisher", "hotspot", "pfz", "catch", "tuna",
         "mackerel", "meen", "sardine", "prawn",
+        "மீன்", "மீன", "மீனவ", "மீன்பிடி", "பிடிக்க",
     ],
     "situational": [
         "weather", "sea state", "wave", "wind", "condition", "advisory",
         "tomorrow", "safety", "update", "status", "conditions",
+        "வானிலை", "அலை", "காற்று", "கடல் நிலை", "புயல்", "பாதுகாப்பு", "பாதுகாப்பா",
     ],
 }
 

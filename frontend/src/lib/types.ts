@@ -78,7 +78,13 @@ export type VesselStatus = {
   imbl_distance_nm: number;
   wave_height_m: number;
   wind_knots: number;
+  source?: string;
 };
+
+/** True when a data source string denotes genuine live external data. */
+export function isLiveSource(source?: string): boolean {
+  return !!source && source.startsWith("open-meteo");
+}
 
 export type PfzZone = {
   lat: number;

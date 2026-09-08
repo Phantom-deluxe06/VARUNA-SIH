@@ -37,6 +37,7 @@ export const FALLBACK_VESSEL: VesselStatus = {
   imbl_distance_nm: 8.4,
   wave_height_m: 1.8,
   wind_knots: 12,
+  source: "offline",
 };
 
 export async function getVesselStatus(): Promise<VesselStatus> {

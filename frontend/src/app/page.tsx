@@ -21,6 +21,7 @@ import {
 import {
   DASHBOARD_ROLES,
   RAMESWARAM,
+  isLiveSource,
   type ChatMessage,
   type PfzZone,
   type UserRole,
@@ -177,9 +178,20 @@ export default function FishermanDashboard() {
           <span className="font-mono text-sm text-slate-300">
             {now ? now.toLocaleTimeString() : "--:--:--"}
           </span>
-          <span className="flex items-center gap-1.5 text-xs text-varuna-safe">
-            <span className="h-2 w-2 rounded-full bg-varuna-safe" />
-            Online
+          <span
+            title={`sea-state source: ${vessel.source ?? "unknown"}`}
+            className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+              isLiveSource(vessel.source)
+                ? "border-varuna-safe/50 text-varuna-safe"
+                : "border-varuna-warn/50 text-varuna-warn"
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                isLiveSource(vessel.source) ? "bg-varuna-safe" : "bg-varuna-warn"
+              }`}
+            />
+            {isLiveSource(vessel.source) ? "Live Data" : "Cached"}
           </span>
           <select
             value={role}

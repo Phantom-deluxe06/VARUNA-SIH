@@ -93,9 +93,11 @@ def pfz_latest() -> dict:
     """Latest potential-fishing-zone probes, ranked by ML/gradient confidence."""
     v_lat, v_lon = _DEFAULT_VESSEL
     zones: list[dict] = []
+    source = "synthetic_model"
     try:
         for lat, lon in _PFZ_CANDIDATES:
             ocean = RASTER.extract_ocean_data(lat, lon)
+            source = ocean.get("source", source)
             vector = RASTER.calculate_safe_vector(v_lat, v_lon, lat, lon)
             conf = ocean.get("ml_confidence")
             if conf is None:
@@ -115,14 +117,16 @@ def pfz_latest() -> dict:
     except Exception:
         logger.exception("pfz/latest raster path failed - using demo zones")
         zones = demo_mode.demo_pfz_zones()
-    return {"zones": zones}
+        source = "DEMO_FALLBACK"
+    return {"zones": zones, "source": source}
 
 
 @app.get("/vessel/status")
 def vessel_status() -> dict:
-    """Mock vessel telemetry for the demo dashboard (enriched from the engine)."""
+    """Vessel telemetry for the dashboard, enriched from live engine data."""
     v_lat, v_lon = _DEFAULT_VESSEL
     status = demo_mode.demo_vessel_status()
+    status["source"] = "DEMO_FALLBACK"
 
     def _ask(q: str) -> dict:
         return (
@@ -138,6 +142,8 @@ def vessel_status() -> dict:
             status["wave_height_m"] = sea["wave_height_m"]
         if sea.get("wind_speed_knots") is not None:
             status["wind_knots"] = sea["wind_speed_knots"]
+        if sea.get("sea_state_source"):
+            status["source"] = sea["sea_state_source"]
     except Exception:
         logger.exception("vessel/status sea-state enrichment failed")
     try:

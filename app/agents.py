@@ -162,10 +162,11 @@ def _find_nearest_port(
 
 
 # ---------------------------------------------------------------------------
-# Deterministic spatial sea-state model (no RNG, no network).
+# Sea-state model: live Open-Meteo marine weather, with a deterministic
+# position-only fallback when the network / service is unavailable.
 # ---------------------------------------------------------------------------
-def _sea_state(lat: float, lon: float) -> dict:
-    """Deterministic sea-state proxies derived purely from position."""
+def _synthetic_sea_state(lat: float, lon: float) -> dict:
+    """Deterministic sea-state proxies derived purely from position (offline)."""
     wind = 12.0 + 5.0 * math.sin(math.radians(lat) * 4.0) + 3.0 * math.cos(math.radians(lon) * 3.0)
     wind = round(max(4.0, min(28.0, wind)), 1)
     gust = round(wind * 1.35, 1)
@@ -176,7 +177,30 @@ def _sea_state(lat: float, lon: float) -> dict:
         "gust_knots": gust,
         "wave_height_m": wave,
         "wave_period_s": period,
+        "source": "synthetic_model",
     }
+
+
+def _sea_state(lat: float, lon: float) -> dict:
+    """Return current sea state, preferring live Open-Meteo marine data."""
+    try:
+        from app.data.open_meteo import LiveDataError, live_sea_state
+
+        try:
+            live = live_sea_state(lat, lon)
+            # Guard against a live wind read of 0 kts (forecast API hiccup):
+            # keep the deterministic wind estimate in that case.
+            if not live.get("wind_speed_knots"):
+                fallback = _synthetic_sea_state(lat, lon)
+                live["wind_speed_knots"] = fallback["wind_speed_knots"]
+                live["gust_knots"] = live.get("gust_knots") or fallback["gust_knots"]
+                live["source"] = "open-meteo+model-wind"
+            return live
+        except LiveDataError as exc:
+            logger.info("Live sea state unavailable, using deterministic model: %s", exc)
+    except Exception:  # pragma: no cover - import/other guard
+        logger.exception("Open-Meteo sea-state path errored; using deterministic model")
+    return _synthetic_sea_state(lat, lon)
 
 
 def _resolve_vessel_draft(req: UserQueryRequest, entities: Optional[dict]) -> float:
@@ -411,6 +435,7 @@ def fishery_safety_agent(
         "distance_nm": dist_nm,
         "wave_height_m": wave,
         "wind_speed_knots": sea["wind_speed_knots"],
+        "sea_state_source": sea.get("source", "synthetic_model"),
     }
     bearing_vector = {
         "from": [req.lat, req.lon],
@@ -433,7 +458,7 @@ def fishery_safety_agent(
         f"PFZ verdict (ML-priority): {pfz_verdict}",
         f"Compass vector to PFZ {PFZ_TARGET_LAT},{PFZ_TARGET_LON}: "
         f"{bearing} deg / {dist_km} km / {dist_nm} NM",
-        f"Deterministic sea state: wave {wave}m, wind {sea['wind_speed_knots']} kts",
+        f"Sea state [{sea.get('source', 'synthetic_model')}]: wave {wave}m, wind {sea['wind_speed_knots']} kts",
     ]
 
     if wave > WAVE_SAFE_LIMIT_M:
@@ -530,6 +555,7 @@ def situational_awareness_agent(
         "wave_period_s": sea["wave_period_s"],
         "wind_speed_knots": wind,
         "gust_knots": sea["gust_knots"],
+        "sea_state_source": sea.get("source", "synthetic_model"),
         "nearest_port": port.port_name if port else None,
         "nearest_port_distance_km": round(port_km, 1) if port else None,
         "system_ready": True,
@@ -553,7 +579,7 @@ def situational_awareness_agent(
         "assembled a dynamic situational awareness advisory",
         f"Live RasterEngine telemetry: SST {sst:.2f} degC, chl {chl:.3f} mg/m3 "
         f"(source {ocean['source']}), {pfz_text}",
-        f"Deterministic sea state: wave {wave}m, wind {wind} kts "
+        f"Sea state [{sea.get('source', 'synthetic_model')}]: wave {wave}m, wind {wind} kts "
         f"(gust {sea['gust_knots']} kts), period {sea['wave_period_s']}s",
         f"Local DB port lookup: {port_text}",
         f"System readiness: engine online, embedded DB online, NLU 3-layer pipeline active",
