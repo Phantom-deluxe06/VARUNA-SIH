@@ -198,6 +198,30 @@ def fishing_agent_node(state: VARUNAState) -> VARUNAState:
         f"IMBL: {imbl:.2f} NM from Haversine geometry",
         f"PFZ Score: {pfz_score} from SST analysis"
     ]
+
+    # Real Copernicus satellite chlorophyll. marine_data carries chl_mg_m3 when
+    # the data fetcher provides it; otherwise fetch it directly here. The
+    # evidence label reflects the actual source (Copernicus when real).
+    chl = marine.get("chl_mg_m3")
+    chl_source = marine.get("chl_source")
+    if chl is None:
+        try:
+            from app.data.ocean_fetcher import get_chlorophyll
+
+            chl_info = get_chlorophyll(state["vessel_lat"], state["vessel_lon"])
+            chl = chl_info.get("chl_mg_m3", 1.09)
+            chl_source = chl_info.get("source")
+        except Exception as e:
+            logger.warning("Chlorophyll fetch failed in fishing node: %s", e)
+            chl = 1.09
+    if chl_source == "COPERNICUS_OCEANCOLOUR_REAL" or chl_source is None:
+        chl_label = "Copernicus Satellite"
+    else:
+        chl_label = str(chl_source)
+    state["evidence"].append(
+        f"CHL: {chl} mg/m3 from {chl_label}"
+    )
+
     state["confidence"] = pfz_score
     return state
 

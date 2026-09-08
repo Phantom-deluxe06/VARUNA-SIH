@@ -15,6 +15,7 @@ import math
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from app.data.chlorophyll_fetcher import get_chlorophyll
 from app.data.open_meteo import get_all_marine_data, live_sea_state
 from app.db.database import (
     get_geofence_ring,
@@ -505,6 +506,12 @@ def fishery_safety_agent(
     else:
         status = "CRITICAL"
 
+    # Real chlorophyll-a from India-reachable satellite sources (falls back
+    # to an SST-derived oceanographic estimate when satellites are blocked).
+    chl_info = get_chlorophyll(req.lat, req.lon, sst=sst)
+    chl = chl_info.get("chl_mg_m3")
+    chl_source = chl_info.get("source", "unknown")
+
     vector = RASTER.calculate_safe_vector(
         req.lat, req.lon, PFZ_TARGET_LAT, PFZ_TARGET_LON
     )
@@ -515,6 +522,7 @@ def fishery_safety_agent(
     evidence = [
         f"SST: {sst}C from Open-Meteo Marine Live",
         f"Wave: {wave}m from Open-Meteo Marine Live",
+        f"CHL: {chl} mg/m3 from {chl_source}",
         f"IMBL: {imbl_nm} NM from Haversine geometry",
     ]
 
@@ -532,6 +540,8 @@ def fishery_safety_agent(
         "pfz_score": pfz_score,
         "pfz_condition": pfz_status_en,
         "pfz_verdict": pfz_verdict,
+        "chlorophyll_mg_m3": chl,
+        "chlorophyll_source": chl_source,
         "nearest_imbl_distance_nm": imbl_nm,
         "target_lat": PFZ_TARGET_LAT,
         "target_lon": PFZ_TARGET_LON,

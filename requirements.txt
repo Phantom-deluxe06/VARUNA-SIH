@@ -3,6 +3,10 @@ uvicorn
 pydantic
 requests
 
+# --- LangGraph multi-agent orchestration -------------------------------------
+langgraph
+langchain-core
+
 # --- Satellite EO & Raster Engine (lazily-imported scientific stack) -----------
 numpy
 xarray
@@ -18,3 +22,5 @@ pyais>=2.7
 flask
 twilio
 python-multipart
+groq
+python-dotenv
