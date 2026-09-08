@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 pydantic
+requests
 
 # --- Satellite EO & Raster Engine (lazily-imported scientific stack) -----------
 numpy
@@ -12,3 +13,8 @@ joblib
 # --- Realtime / AIS ingestion -------------------------------------------------
 websockets>=12.0
 pyais>=2.7
+
+# --- WhatsApp bot + web form parsing -----------------------------------------
+flask
+twilio
+python-multipart

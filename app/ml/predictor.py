@@ -1,8 +1,13 @@
 """VARUNA PFZ inference module.
 
-Loads the offline-trained gradient-boosting classifier (``pfz_model.joblib``)
-produced by :mod:`app.ml.train_pfz_model` and exposes a single deterministic
-inference entry point used by the ``RasterEngine``.
+Loads the offline-trained gradient-boosting classifier and exposes a single
+deterministic inference entry point used by the ``RasterEngine``.
+
+Model resolution order:
+1. ``pfz_model_v2.joblib`` — retrained on live Open-Meteo + NOAA data with the
+   currently installed scikit-learn (:mod:`app.ml.train_real_model`).
+2. ``pfz_model.joblib``    — legacy artefact (:mod:`app.ml.train_pfz_model`).
+When neither loads, inference degrades gracefully to ``(False, 0.0)``.
 """
 
 from __future__ import annotations
@@ -13,7 +18,18 @@ from pathlib import Path
 
 logger = logging.getLogger("varuna.ml.predictor")
 
-MODEL_PATH = Path(__file__).resolve().parent / "pfz_model.joblib"
+_MODEL_DIR = Path(__file__).resolve().parent
+_MODEL_CANDIDATES = (_MODEL_DIR / "pfz_model_v2.joblib", _MODEL_DIR / "pfz_model.joblib")
+
+
+def _resolve_model_path() -> Path:
+    for path in _MODEL_CANDIDATES:
+        if path.exists():
+            return path
+    return _MODEL_CANDIDATES[0]
+
+
+MODEL_PATH = _resolve_model_path()
 
 # Feature vector layout expected by the trained estimator (order matters).
 FEATURE_NAMES = ["sst", "chlorophyll", "sst_gradient", "chl_gradient", "distance_to_shore"]
@@ -28,21 +44,24 @@ _model_meta: dict = {}
 
 def _load_model():
     """Lazily load (and cache) the trained estimator. Returns None when absent."""
-    global _model, _model_meta
+    global _model, _model_meta, MODEL_PATH
     if _model is not None:
         return _model
     with _lock:
         if _model is not None:
             return _model
+        MODEL_PATH = _resolve_model_path()
         if not MODEL_PATH.exists():
-            logger.warning("PFZ model not found at %s - run python -m app.ml.train_pfz_model", MODEL_PATH)
+            logger.warning("PFZ model not found at %s - run python -m app.ml.train_real_model", MODEL_PATH)
             return None
         import joblib
 
         bundle = joblib.load(MODEL_PATH)
         _model = bundle["model"] if isinstance(bundle, dict) and "model" in bundle else bundle
         _model_meta = bundle.get("meta", {}) if isinstance(bundle, dict) else {}
-        meta_file = MODEL_PATH.with_name("pfz_model_meta.json")
+        meta_file = MODEL_PATH.with_name(MODEL_PATH.stem + "_meta.json")
+        if not meta_file.exists():
+            meta_file = MODEL_PATH.with_name("pfz_model_meta.json")
         if meta_file.exists():
             try:
                 import json as _json

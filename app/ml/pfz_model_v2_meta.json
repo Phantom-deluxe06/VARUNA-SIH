@@ -1,0 +1,46 @@
+{
+  "trained_at_utc": "2026-09-08T13:04:35.740255+00:00",
+  "estimator": "GradientBoostingClassifier",
+  "sklearn_trained_with": "1.9.0",
+  "data_sources": [
+    "Open-Meteo Marine API",
+    "NOAA CoastWatch ERDDAP (chlorophyll)"
+  ],
+  "grid": {
+    "lats": [
+      8.0,
+      8.5,
+      9.0,
+      9.5,
+      10.0,
+      10.5,
+      11.0,
+      11.5,
+      12.0
+    ],
+    "lons": [
+      78.0,
+      78.5,
+      79.0,
+      79.5,
+      80.0,
+      80.5,
+      81.0,
+      81.5,
+      82.0
+    ],
+    "hour_step": 3
+  },
+  "feature_names": [
+    "sst",
+    "chlorophyll",
+    "sst_gradient",
+    "chl_gradient",
+    "distance_to_shore"
+  ],
+  "label_rule": "SST 26-30.5C AND wave<1.5m AND (sst_gradient>0.25 OR current>0.10)",
+  "n_samples": 864,
+  "positive_rate": 0.5833,
+  "accuracy": 0.8902,
+  "roc_auc": 0.9759
+}
