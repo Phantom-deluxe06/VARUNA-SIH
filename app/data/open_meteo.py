@@ -42,7 +42,7 @@ def get_all_marine_data(lat: float = 9.9252, lon: float = 79.3129) -> dict:
         ],
         "forecast_days": 2
     }
-    r = requests.get(url, params=params, timeout=10)
+    r = requests.get(url, params=params, timeout=5)
     data = r.json()
     hourly = data["hourly"]
 
@@ -56,7 +56,7 @@ def get_all_marine_data(lat: float = 9.9252, lon: float = 79.3129) -> dict:
             "current": ["wind_speed_10m", "wind_gusts_10m"],
             "wind_speed_unit": "kn",
         }
-        rf = requests.get(FORECAST_URL, params=f_params, timeout=8)
+        rf = requests.get(FORECAST_URL, params=f_params, timeout=5)
         if rf.status_code == 200:
             f_curr = rf.json().get("current", {})
             wind_knots = round(float(f_curr.get("wind_speed_10m", 0.0) or 0.0), 1)

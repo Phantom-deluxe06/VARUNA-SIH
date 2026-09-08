@@ -19,6 +19,7 @@ from app.services import data_fetcher
 from app.schemas import AgentDecisionResponse, SimpleQueryRequest, UserQueryRequest
 from app.services.intelligence_engine import route_query
 from app.services.raster_service import RasterEngine
+from app.services.varuna_graph import process_query
 from app import demo_mode, whatsapp_core
 
 # Shared stateless raster engine (mirrors app.agents.RASTER).
@@ -106,21 +107,15 @@ def handle_query(req: UserQueryRequest):
 
 @app.post("/query")
 def handle_simple_query(req: SimpleQueryRequest = SimpleQueryRequest()):
-    """Live marine query endpoint (Rameswaram defaults)."""
-    user_req = req.to_user_query()
-    decision = route_query(user_req)
-    if decision.sst_celsius is None or decision.wave_height_m is None:
-        from app.data.open_meteo import get_all_marine_data
-        m = get_all_marine_data(user_req.lat, user_req.lon)
-        decision.sst_celsius = m["sst_celsius"]
-        decision.wave_height_m = m["wave_height_m"]
-        decision.ocean_current_ms = m["ocean_current_ms"]
-        decision.data_source = m["source"]
-    if not decision.data_timestamp:
-        decision.data_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if not decision.alert_level:
-        decision.alert_level = decision.status
-    result = decision.model_dump(by_alias=True)
+    """Live marine query endpoint — LangGraph multi-agent orchestration."""
+    result = process_query(
+        query=req.query,
+        vessel_lat=req.vessel_lat or req.lat or 9.9252,
+        vessel_lon=req.vessel_lon or req.lon or 79.3129,
+        vessel_draft=req.vessel_draft or req.draft or 2.5,
+        role=req.role or "Fisherman",
+        phone=getattr(req, "phone", "default")
+    )
     return JSONResponse(
         content=json.loads(
             json.dumps(result, ensure_ascii=False)

@@ -2,7 +2,10 @@
 
 ``get_marine_data()`` returns one dict combining:
 * **SST + marine telemetry** — Open-Meteo Marine Live API.
-* **chlorophyll**           — NOAA CoastWatch ERDDAP via RasterEngine.
+* **chlorophyll**           — Copernicus Marine (real satellite L4, via saved
+  credentials), falling back to ChlorophyllFetcher (CoastWatch ERDDAP VIIRS,
+  NASA OceanColour, SST-derived oceanographic last resort); RasterEngine
+  remains a final safety net.
 
 ``compute_pfz()`` applies the INCOIS-style PFZ rule plus the offline ML classifier.
 """
@@ -10,10 +13,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from app.data.chlorophyll_fetcher import ChlorophyllFetcher
 from app.data.open_meteo import LiveDataError, daily_forecast, get_all_marine_data, live_sea_state
 from app.services import raster_service
 from app.services.raster_service import RasterEngine
@@ -21,6 +26,7 @@ from app.services.raster_service import RasterEngine
 logger = logging.getLogger("varuna.ocean_fetcher")
 
 _RASTER = RasterEngine()
+_CHL_FETCHER = ChlorophyllFetcher()
 
 
 def get_marine_data(lat: float, lon: float) -> dict:
@@ -29,18 +35,45 @@ def get_marine_data(lat: float, lon: float) -> dict:
 
     ocean = _RASTER.extract_ocean_data(lat, lon)
     raster_src = ocean.get("source", "satellite")
-    chl = ocean.get("chlorophyll_mg_m3", 0.8)
 
     marine = get_all_marine_data(lat, lon)
     sst = marine["sst_celsius"]
     wave = marine["wave_height_m"]
     current = marine["ocean_current_ms"]
 
+    # Real satellite chlorophyll: Copernicus first, then the
+    # ChlorophyllFetcher chain (ERDDAP VIIRS / NASA / SST-derived), with the
+    # raster engine (cached netCDF / synthetic model) as a final safety net.
+    chl_info = get_chlorophyll(lat, lon, sst=sst)
+    chl = chl_info.get("chl_mg_m3")
+    if chl is not None:
+        chl_source = chl_info.get("source", "satellite")
+        chl_method = chl_info.get("method", "satellite")
+        chl_confidence = chl_info.get(
+            "confidence", "HIGH" if str(chl_source).startswith("COPERNICUS") else "MEDIUM"
+        )
+        sources.append(f"CHL: {chl_source}")
+    else:
+        chl = ocean.get("chlorophyll_mg_m3", 0.8)
+        chl_source = raster_src
+        chl_method = "raster engine"
+        chl_confidence = "LOW"
+
     data: dict = {
         "lat": lat,
         "lon": lon,
         "sst_c": round(sst, 2),
         "chl_mg_m3": round(chl, 3),
+        "chl_source": chl_source,
+        "chl_method": chl_method,
+        "chl_confidence": chl_confidence,
+        "chl_max": chl_info.get("chl_max"),
+        "is_high_productivity": bool(
+            chl_info.get("is_high_productivity", chl is not None and chl > 0.5)
+        ),
+        "pfz_chl_score": chl_info.get(
+            "pfz_chl_score", min(chl / 0.5, 1.0) if chl else 0.0
+        ),
         "sst_gradient_c_per_deg": round(ocean.get("sst_gradient_c_per_deg", 0.0), 4),
         "chl_gradient_mg_m3_per_deg": round(ocean.get("chl_gradient_mg_m3_per_deg", 0.0), 4),
         "raster_source": raster_src,
@@ -57,6 +90,59 @@ def get_marine_data(lat: float, lon: float) -> dict:
     }
 
     return data
+
+
+def get_chlorophyll(lat: float, lon: float, sst: Optional[float] = None) -> dict:
+    """Real Copernicus ocean-colour chlorophyll-a at (lat, lon).
+
+    Primary: Copernicus Marine ``cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-
+    multi-4km_P1D`` (daily gap-free L4, ~4 km) over a 4-day window ending now —
+    NRT ocean colour lags ~2 days, so this always captures the latest slices
+    without pulling the full multi-year time series.
+
+    Fallback: the :class:`~app.data.chlorophyll_fetcher.ChlorophyllFetcher`
+    chain (CoastWatch ERDDAP VIIRS -> NASA OceanColour -> SST-derived
+    oceanographic estimate), which never raises.
+    """
+    try:
+        return _copernicus_chlorophyll(lat, lon)
+    except Exception as exc:
+        logger.warning("Copernicus chlorophyll failed (%s); using fallback chain", exc)
+    return _CHL_FETCHER.get_chlorophyll(lat, lon, sst=sst)
+
+
+def _copernicus_chlorophyll(lat: float, lon: float) -> dict:
+    """Single Copernicus Marine fetch. Raises on any failure."""
+    import copernicusmarine
+    import numpy as np
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=4)
+    ds = copernicusmarine.open_dataset(
+        dataset_id="cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D",
+        minimum_latitude=lat - 2,
+        maximum_latitude=lat + 2,
+        minimum_longitude=lon - 2,
+        maximum_longitude=lon + 2,
+        start_datetime=start.strftime("%Y-%m-%dT%H:%M:%S"),
+        end_datetime=end.strftime("%Y-%m-%dT%H:%M:%S"),
+        variables=["CHL"],
+    )
+    chl = ds["CHL"].values
+    chl_mean = float(np.nanmean(chl))
+    chl_max = float(np.nanmax(chl))
+    if not math.isfinite(chl_mean) or chl_mean <= 0:
+        raise ValueError("Copernicus CHL window contained no valid data")
+
+    return {
+        "chl_mg_m3": round(chl_mean, 4),
+        "chl_max": round(chl_max, 4),
+        "is_high_productivity": chl_mean > 0.5,
+        "pfz_chl_score": min(chl_mean / 0.5, 1.0),
+        "source": "COPERNICUS_OCEANCOLOUR_REAL",
+        "method": "Copernicus L4 gapfree daily CHL (4-day window mean)",
+        "dataset": "cmems_obs-oc_glo_bgc-plankton_nrt_l4",
+    }
 
 
 def compute_pfz(

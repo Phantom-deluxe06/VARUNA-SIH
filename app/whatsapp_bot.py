@@ -33,8 +33,21 @@ def whatsapp_health() -> str:
 def whatsapp_webhook() -> Response:
     body = request.values.get("Body", "")
     sender = request.values.get("From", "unknown")
-    app.logger.info("WhatsApp in from %s: %s", sender, body)
-    reply = whatsapp_core.handle_message(body)
+    lat = request.values.get("Latitude")
+    lon = request.values.get("Longitude")
+    if lat:
+        try:
+            lat = float(lat)
+        except (ValueError, TypeError):
+            lat = None
+    if lon:
+        try:
+            lon = float(lon)
+        except (ValueError, TypeError):
+            lon = None
+
+    app.logger.info("WhatsApp in from %s (lat=%s, lon=%s): %s", sender, lat, lon, body)
+    reply = whatsapp_core.handle_message(body, phone=sender, lat=lat, lon=lon)
     return Response(whatsapp_core.twiml(reply), mimetype="application/xml")
 
 

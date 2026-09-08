@@ -48,35 +48,57 @@ PORT_ALIASES: dict[str, str] = {
     "tuicorin": "Thoothukudi Port",
 }
 
-FISHING_KEYWORDS: list[str] = [
-    "மீன்", "மீன் எங்க", "மீன் இருக்கு",
-    "மீன்பிடி", "PFZ", "pfz",
-    "fish", "fishing zone", "where to fish",
-    "மண்டலம்", "மீன் மண்டலம்"
+FISHING_PATTERNS: list[str] = [
+    "மீன்", "மண்டலம்", "pfz", "fish",
+    "மீன்பிடி", "எங்க மீன்", "மீன் இருக்கு",
+    "fishing zone", "where to fish",
+    "மீன் எங்கே", "மீன் கிடைக்கும்",
+    "catch fish", "மீன் பிடிக்க",
 ]
 
+SAFETY_PATTERNS: list[str] = [
+    "safe", "பாதுகாப்பு", "போகலாமா",
+    "கடல் நிலை", "sea condition",
+    "venture", "sail today", "go to sea",
+    "kadal", "கடலுக்கு", "புறப்பட",
+]
+
+BORDER_PATTERNS: list[str] = [
+    "எல்லை", "border", "imbl", "boundary",
+    "இலங்கை", "lanka", "sri lanka",
+    "எல்லைக்கோடு", "limit", "maritime",
+]
+
+WEATHER_PATTERNS: list[str] = [
+    "அலை", "wave", "wind", "காற்று",
+    "புயல்", "storm", "cyclone", "rain",
+    "மழை", "வானிலை", "weather", "forecast",
+]
+
+TOMORROW_PATTERNS: list[str] = [
+    "நாளைக்கு", "tomorrow", "forecast",
+    "நாளை", "next day", "morning",
+    "காலை", "அடுத்த நாள்", "plan",
+]
+
+UKC_PATTERNS: list[str] = [
+    "draft", "draught", "under keel", "ukc", "channel", "dock", "berth",
+    "pilot", "grounding", "clearance", "port", "harbour", "approach",
+]
+
+FISHING_KEYWORDS = FISHING_PATTERNS
+
 INTENT_KEYWORDS: dict[str, list[str]] = {
-    "ukc": [
-        "draft", "draught", "under keel", "ukc", "channel", "dock", "berth",
-        "pilot", "grounding", "clearance", "port", "harbour", "approach",
-    ],
-    "border": [
-        "border", "imbl", "boundary", "international maritime", "lanka",
-        "maritime boundary", "territorial", "geofence", "restricted zone",
-        "எல்லை", "இலங்கை", "கடல் எல்லை",
-    ],
-    "fishing": [
-        *FISHING_KEYWORDS,
-        "fisher", "hotspot", "catch", "tuna",
-        "mackerel", "meen", "sardine", "prawn",
-        "மீன", "மீனவ", "பிடிக்க",
-    ],
+    "ukc": UKC_PATTERNS,
+    "border": BORDER_PATTERNS,
+    "fishing": FISHING_PATTERNS,
     "situational": [
-        "weather", "sea state", "wave", "wind", "condition", "advisory",
-        "tomorrow", "safety", "update", "status", "conditions",
-        "வானிலை", "அலை", "காற்று", "கடல் நிலை", "புயல்", "பாதுகாப்பு", "பாதுகாப்பா",
+        *SAFETY_PATTERNS,
+        *WEATHER_PATTERNS,
+        *TOMORROW_PATTERNS,
     ],
 }
+
 
 # ---------------------------------------------------------------------------
 # Layer 2 — fuzzy lexicon + canonical examples.
@@ -134,7 +156,7 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     ],
 }
 
-FUZZY_THRESHOLD = 0.45
+FUZZY_THRESHOLD = 0.65
 
 
 def _extract_layer1_entities(query: str) -> dict:
@@ -152,19 +174,32 @@ def _extract_layer1_entities(query: str) -> dict:
 
 
 def _layer1_intent(query: str) -> Optional[str]:
-    """Keyword-count routing; returns the highest-scoring intent or None."""
-    if any(kw in query or kw.lower() in query.lower() for kw in FISHING_KEYWORDS):
+    """Pattern routing with substring contains check; returns matched intent or None."""
+    q = (query or "").lower()
+    if not q:
+        return None
+
+    # Draft regex or UKC patterns
+    if DRAFT_RE.search(query) or any(pat in q for pat in UKC_PATTERNS):
+        return "ukc"
+
+    # Border / IMBL patterns
+    if any(pat in q for pat in BORDER_PATTERNS):
+        return "border"
+
+    # Fishing / PFZ patterns
+    if any(pat in q for pat in FISHING_PATTERNS):
         return "fishing"
 
-    hits = {
-        intent: sum(1 for kw in keywords if kw in query)
-        for intent, keywords in INTENT_KEYWORDS.items()
-    }
-    scored = {intent: score for intent, score in hits.items() if score > 0}
-    if not scored:
-        return None
-    best_intent = max(scored.items(), key=lambda kv: (kv[1], kv[0]))[0]
-    return best_intent
+    # Safety / Weather / Tomorrow patterns -> situational agent
+    if (
+        any(pat in q for pat in SAFETY_PATTERNS)
+        or any(pat in q for pat in WEATHER_PATTERNS)
+        or any(pat in q for pat in TOMORROW_PATTERNS)
+    ):
+        return "situational"
+
+    return None
 
 
 def _layer2_intent(query: str) -> Optional[str]:
@@ -181,6 +216,8 @@ def _layer2_intent(query: str) -> Optional[str]:
             if ratio > best_ratio:
                 best_ratio, best_intent = ratio, intent
     return best_intent if best_ratio >= FUZZY_THRESHOLD else None
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator: classify → dispatch → audit → respond.
 # ---------------------------------------------------------------------------
@@ -193,17 +230,54 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
     query = (req.query or "").strip()
     entities = _extract_layer1_entities(query)
 
-    # Immediate Layer 1 detection: ANY of FISHING_KEYWORDS found in query
-    if query and (any(kw in query or kw.lower() in query.lower() for kw in FISHING_KEYWORDS) or (all(c in "? " for c in query) and req.user_role == "fisherman")):
+    intent = None
+    layer = "L1"
+
+    # Immediate Layer 1 detection / question-mark shortcut
+    if query and all(c in "? " for c in query) and req.user_role == "fisherman":
         intent = "fishing"
         layer = "L1"
-    else:
-        intent = _layer1_intent(query.lower()) if query else None
-        layer = "L1"
+    elif query:
+        intent = _layer1_intent(query)
         if intent is None:
             intent = _layer2_intent(query)
-            layer = "L2"
-        if intent is None:
+            if intent is not None:
+                layer = "L2"
+
+    if intent is None:
+        # Unknown → Groq AI fallback
+        layer = "L3-Groq"
+        try:
+            from app.services.groq_engine import ask_groq
+
+            ai_reply = ask_groq(query if query else "Hello, VARUNA assistance")
+            decision = AgentDecisionResponse(
+                status="SAFE",
+                alert_level="SAFE",
+                agent_name="VARUNA Groq AI Agent",
+                advisory_en=ai_reply,
+                advisory_ta=ai_reply,
+                data_source="VARUNA AI + Open-Meteo Live",
+                evidence=[f"Groq AI fallback for query: '{query}'"],
+                evidence_trace=[f"NLU Layer-{layer}: unknown query -> Groq AI fallback"],
+                metrics={"ai_fallback": True},
+            )
+            try:
+                insert_audit(
+                    AuditLogEntry(
+                        query=req.query,
+                        latitude=req.lat,
+                        longitude=req.lon,
+                        classified_intent="groq_ai",
+                        risk_status=decision.status,
+                        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    )
+                )
+            except Exception:
+                pass
+            return decision
+        except Exception:
+            logger.exception("Groq AI fallback failed, using situational agent")
             intent = "situational"
             layer = "L3"
 
@@ -254,6 +328,10 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
 # Self-test / verification block.
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
     from app.db.database import audit_count, init_db
