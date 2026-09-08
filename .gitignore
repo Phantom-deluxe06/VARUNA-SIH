@@ -18,3 +18,4 @@ frontend/.env*.local
 # --- VARUNA generated ML / satellite artefacts -------------------------------
 app/data/satellite/*.nc
 app/ml/pfz_model.joblib
+app/ml/pfz_model_v2.joblib
