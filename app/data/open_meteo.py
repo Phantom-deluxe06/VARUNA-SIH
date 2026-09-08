@@ -1,152 +1,121 @@
 """Live marine weather from the Open-Meteo APIs.
 
-Free, key-less, CORS-open. Two endpoints are combined:
-
-* ``marine-api.open-meteo.com/v1/marine``  -> wave height / period / direction,
-  wind-wave and swell components (ECMWF WAM / GFS-Wave).
-* ``api.open-meteo.com/v1/forecast``       -> 10 m wind speed / direction / gusts.
-
-Only the Python standard library is used (mirrors ``app/services/data_fetcher``),
-so no new dependency is introduced. Results are cached in-process for a few
-minutes so the 30 s dashboard poll and repeated agent calls do not hammer the
-service. Any failure raises ``LiveDataError`` so the caller can fall back to the
-deterministic model.
+Real-time Open-Meteo Marine and Forecast APIs providing:
+- sea_surface_temperature (SST)
+- wave_height, wave_period, wave_direction, swell_wave_height, wind_wave_height
+- ocean_current_velocity
+- 10m wind speed and gusts (knots)
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import time
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
+from typing import Optional
+import requests
 
 logger = logging.getLogger("varuna.open_meteo")
 
 MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-_CACHE_TTL_S = 600.0
-_TIMEOUT_S = 8.0
-_cache: dict[tuple[float, float], tuple[float, dict]] = {}
-
 
 class LiveDataError(RuntimeError):
     """Raised when live marine weather cannot be retrieved."""
 
 
-def _get_json(url: str, params: dict) -> dict:
-    query = urllib.parse.urlencode(params)
-    req = urllib.request.Request(f"{url}?{query}", headers={"User-Agent": "VARUNA/1.0"})
+def get_all_marine_data(lat: float = 9.9252, lon: float = 79.3129) -> dict:
+    """Fetch real-time comprehensive marine and wind data from Open-Meteo."""
+    import requests
+    url = "https://marine-api.open-meteo.com/v1/marine"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": [
+            "wave_height",
+            "wave_period",
+            "sea_surface_temperature", 
+            "ocean_current_velocity",
+            "wave_direction",
+            "swell_wave_height",
+            "wind_wave_height"
+        ],
+        "forecast_days": 2
+    }
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
+    hourly = data["hourly"]
+
+    # Fetch live 10m wind speed and gusts in knots from Open-Meteo forecast API
+    wind_knots = 0.0
+    gust_knots = 0.0
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
-            if resp.status != 200:
-                raise LiveDataError(f"{url} -> HTTP {resp.status}")
-            return json.loads(resp.read().decode("utf-8"))
-    except LiveDataError:
-        raise
-    except Exception as exc:  # URLError, timeout, JSON, ...
-        raise LiveDataError(f"{url} failed: {exc}") from exc
+        f_params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": ["wind_speed_10m", "wind_gusts_10m"],
+            "wind_speed_unit": "kn",
+        }
+        rf = requests.get(FORECAST_URL, params=f_params, timeout=8)
+        if rf.status_code == 200:
+            f_curr = rf.json().get("current", {})
+            wind_knots = round(float(f_curr.get("wind_speed_10m", 0.0) or 0.0), 1)
+            gust_knots = round(float(f_curr.get("wind_gusts_10m", 0.0) or 0.0), 1)
+    except Exception as exc:
+        logger.warning("Forecast wind fetch failed: %s", exc)
+
+    raw_period = hourly.get("wave_period", [None])[0]
+    wave_period_s = round(float(raw_period), 2) if raw_period is not None else None
+
+    return {
+        "sst_celsius": hourly["sea_surface_temperature"][0],
+        "wave_height_m": hourly["wave_height"][0],
+        "wave_period_s": wave_period_s,
+        "ocean_current_ms": hourly["ocean_current_velocity"][0],
+        "wave_direction_deg": hourly["wave_direction"][0],
+        "swell_height_m": hourly["swell_wave_height"][0],
+        "wind_knots": wind_knots,
+        "gust_knots": gust_knots,
+        "wind_speed_knots": wind_knots,
+        "max_wave_24h": max(hourly["wave_height"][:24]),
+        "forecast_waves": hourly["wave_height"][:48],
+        "source": "OPEN_METEO_MARINE_LIVE",
+        "coordinates": {"lat": lat, "lon": lon}
+    }
 
 
 class OpenMeteoMarine:
-    """Thin client that returns a normalised sea-state dict."""
+    """Thin client returning normalised sea-state dict backed by get_all_marine_data."""
 
     def get_sea_state(self, lat: float, lon: float) -> dict:
-        key = (round(lat, 2), round(lon, 2))
-        now = time.monotonic()
-        cached = _cache.get(key)
-        if cached and now - cached[0] < _CACHE_TTL_S:
-            return cached[1]
-
-        marine = _get_json(
-            MARINE_URL,
-            {
-                "latitude": lat,
-                "longitude": lon,
-                "current": "wave_height,wave_period,wave_direction,wind_wave_height,swell_wave_height",
-            },
-        )
-        wind = _get_json(
-            FORECAST_URL,
-            {
-                "latitude": lat,
-                "longitude": lon,
-                "current": "wind_speed_10m,wind_direction_10m,wind_gusts_10m",
-                "wind_speed_unit": "kn",
-            },
-        )
-
-        m = marine.get("current") or {}
-        w = wind.get("current") or {}
-        if m.get("wave_height") is None:
-            raise LiveDataError("Open-Meteo returned no wave_height")
-
-        wave = float(m["wave_height"])
-        period = m.get("wave_period")
-        wind_kn = w.get("wind_speed_10m")
-        gust_kn = w.get("wind_gusts_10m")
-
-        result = {
-            "wave_height_m": round(wave, 2),
-            "wave_period_s": round(float(period), 1) if period is not None else round(max(4.5, 9.5 - wave * 1.2), 1),
-            "wind_speed_knots": round(float(wind_kn), 1) if wind_kn is not None else 0.0,
-            "gust_knots": round(float(gust_kn), 1) if gust_kn is not None else 0.0,
-            "wind_direction_deg": w.get("wind_direction_10m"),
-            "wave_direction_deg": m.get("wave_direction"),
-            "swell_height_m": m.get("swell_wave_height"),
-            "wind_wave_height_m": m.get("wind_wave_height"),
-            "source": "open-meteo",
+        data = get_all_marine_data(lat, lon)
+        return {
+            "wave_height_m": data["wave_height_m"],
+            "sst_celsius": data["sst_celsius"],
+            "ocean_current_ms": data["ocean_current_ms"],
+            "wave_direction_deg": data["wave_direction_deg"],
+            "swell_height_m": data["swell_height_m"],
+            "wind_speed_knots": data["wind_speed_knots"],
+            "wind_knots": data["wind_knots"],
+            "gust_knots": data["gust_knots"],
+            "wave_period_s": data["wave_period_s"],
+            "source": data["source"],
             "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        _cache[key] = (now, result)
-        return result
-
 
     def get_daily_forecast(self, lat: float, lon: float, day_offset: int = 1) -> dict:
-        """Daily max wave / wind for ``today + day_offset`` (default: tomorrow)."""
-        marine = _get_json(
-            MARINE_URL,
-            {
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "wave_height_max,wave_period_max,swell_wave_height_max",
-                "forecast_days": max(2, day_offset + 1),
-                "timezone": "auto",
-            },
-        )
-        wind = _get_json(
-            FORECAST_URL,
-            {
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "wind_speed_10m_max,wind_gusts_10m_max",
-                "wind_speed_unit": "kn",
-                "forecast_days": max(2, day_offset + 1),
-                "timezone": "auto",
-            },
-        )
-        md = marine.get("daily") or {}
-        wd = wind.get("daily") or {}
-        times = md.get("time") or []
-        if day_offset >= len(times):
-            raise LiveDataError(f"Open-Meteo daily has no day+{day_offset}")
-
-        def _at(series: list, i: int):
-            return series[i] if series and i < len(series) else None
-
-        wave = _at(md.get("wave_height_max"), day_offset)
-        if wave is None:
-            raise LiveDataError("Open-Meteo daily returned no wave_height_max")
+        data = get_all_marine_data(lat, lon)
+        forecast_waves = data.get("forecast_waves", [])
+        wave_max = max(forecast_waves[24:48]) if len(forecast_waves) >= 48 else data["max_wave_24h"]
         return {
-            "date": times[day_offset],
-            "wave_height_m": round(float(wave), 2),
-            "wave_period_s": round(float(_at(md.get("wave_period_max"), day_offset) or 0.0), 1) or None,
-            "swell_height_m": _at(md.get("swell_wave_height_max"), day_offset),
-            "wind_speed_knots": round(float(_at(wd.get("wind_speed_10m_max"), day_offset) or 0.0), 1) or None,
-            "gust_knots": round(float(_at(wd.get("wind_gusts_10m_max"), day_offset) or 0.0), 1) or None,
-            "source": "open-meteo",
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "wave_height_m": wave_max,
+            "wave_period_s": data["wave_period_s"],
+            "swell_height_m": data["swell_height_m"],
+            "wind_speed_knots": data["wind_speed_knots"],
+            "wind_knots": data["wind_knots"],
+            "gust_knots": data["gust_knots"],
+            "source": data["source"],
             "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
@@ -155,10 +124,10 @@ _client = OpenMeteoMarine()
 
 
 def live_sea_state(lat: float, lon: float) -> dict:
-    """Module-level helper; raises :class:`LiveDataError` on any failure."""
+    """Module-level helper for live sea state."""
     return _client.get_sea_state(lat, lon)
 
 
 def daily_forecast(lat: float, lon: float, day_offset: int = 1) -> dict:
-    """Module-level helper; raises :class:`LiveDataError` on any failure."""
+    """Module-level helper for marine forecast."""
     return _client.get_daily_forecast(lat, lon, day_offset)

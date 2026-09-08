@@ -1,18 +1,21 @@
-"""VARUNA intent agents — deterministic domain handlers.
+"""VARUNA intent agents — deterministic domain handlers backed by live Open-Meteo marine data.
 
-Each handler is backed by the embedded SQLite store (``app.db``) and the
-offline Satellite EO ``RasterEngine``. No external cloud LLM APIs, no static
-mocks; every advisory is computed live from local data. Agents are pure
-functions over ``UserQueryRequest`` + extracted NLU entities and return the
-canonical ``AgentDecisionResponse`` contract consumed by the frontend.
+Each handler is backed by the embedded SQLite store (``app.db``), the
+offline Satellite EO ``RasterEngine``, and the live Open-Meteo Marine API.
+No external cloud LLM APIs, no static mocks; every advisory is computed live
+from real data. Agents are pure functions over ``UserQueryRequest`` + extracted
+NLU entities and return the canonical ``AgentDecisionResponse`` contract consumed
+by the frontend.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from app.data.open_meteo import get_all_marine_data, live_sea_state
 from app.db.database import (
     get_geofence_ring,
     get_port_by_name,
@@ -32,7 +35,7 @@ RASTER = RasterEngine()
 # ---------------------------------------------------------------------------
 PFZ_TARGET_LAT = 9.28      # canonical PFZ hotspot anchor (matches frontend)
 PFZ_TARGET_LON = 79.31
-WAVE_SAFE_LIMIT_M = 2.0
+WAVE_SAFE_LIMIT_M = 1.5
 IMBL_CRITICAL_NM = 2.0
 IMBL_WARNING_NM = 5.0
 
@@ -115,6 +118,8 @@ def _cross_track_distance_nm(
         d2b = _central_angle_rad(phi_p, lam_p, phi_b, lam_b) * r_nm
         return abs(d2b)                                        # past end
     return abs(x_track)
+
+
 def _nearest_imbl_segment_nm(
     lat: float,
     lon: float,
@@ -162,45 +167,24 @@ def _find_nearest_port(
 
 
 # ---------------------------------------------------------------------------
-# Sea-state model: live Open-Meteo marine weather, with a deterministic
-# position-only fallback when the network / service is unavailable.
+# Sea-state model: live Open-Meteo marine weather.
 # ---------------------------------------------------------------------------
-def _synthetic_sea_state(lat: float, lon: float) -> dict:
-    """Deterministic sea-state proxies derived purely from position (offline)."""
-    wind = 12.0 + 5.0 * math.sin(math.radians(lat) * 4.0) + 3.0 * math.cos(math.radians(lon) * 3.0)
-    wind = round(max(4.0, min(28.0, wind)), 1)
-    gust = round(wind * 1.35, 1)
-    wave = round(max(0.4, 0.25 * (wind / 10.0) ** 1.5 + 0.5), 2)
-    period = round(max(4.5, min(12.0, 9.5 - wave * 1.2)), 1)
-    return {
-        "wind_speed_knots": wind,
-        "gust_knots": gust,
-        "wave_height_m": wave,
-        "wave_period_s": period,
-        "source": "synthetic_model",
-    }
-
-
 def _sea_state(lat: float, lon: float) -> dict:
-    """Return current sea state, preferring live Open-Meteo marine data."""
-    try:
-        from app.data.open_meteo import LiveDataError, live_sea_state
-
-        try:
-            live = live_sea_state(lat, lon)
-            # Guard against a live wind read of 0 kts (forecast API hiccup):
-            # keep the deterministic wind estimate in that case.
-            if not live.get("wind_speed_knots"):
-                fallback = _synthetic_sea_state(lat, lon)
-                live["wind_speed_knots"] = fallback["wind_speed_knots"]
-                live["gust_knots"] = live.get("gust_knots") or fallback["gust_knots"]
-                live["source"] = "open-meteo+model-wind"
-            return live
-        except LiveDataError as exc:
-            logger.info("Live sea state unavailable, using deterministic model: %s", exc)
-    except Exception:  # pragma: no cover - import/other guard
-        logger.exception("Open-Meteo sea-state path errored; using deterministic model")
-    return _synthetic_sea_state(lat, lon)
+    """Return live marine data from Open-Meteo."""
+    marine = get_all_marine_data(lat, lon)
+    return {
+        "wave_height_m": marine["wave_height_m"],
+        "sst_celsius": marine["sst_celsius"],
+        "ocean_current_ms": marine["ocean_current_ms"],
+        "wave_direction_deg": marine["wave_direction_deg"],
+        "swell_height_m": marine["swell_height_m"],
+        "max_wave_24h": marine["max_wave_24h"],
+        "wind_speed_knots": marine.get("wind_speed_knots") or marine.get("wind_knots"),
+        "wind_knots": marine.get("wind_knots") or marine.get("wind_speed_knots"),
+        "gust_knots": marine.get("gust_knots"),
+        "wave_period_s": marine.get("wave_period_s"),
+        "source": marine["source"],
+    }
 
 
 def _resolve_vessel_draft(req: UserQueryRequest, entities: Optional[dict]) -> float:
@@ -225,6 +209,8 @@ def _resolve_port(req: UserQueryRequest, entities: Optional[dict]) -> PortChanne
     if fallback is None:
         raise RuntimeError("No ports seeded in the embedded database")
     return fallback
+
+
 # ---------------------------------------------------------------------------
 # Agent: Port & Hydrographic — UKC from the embedded ports_channels table.
 # ---------------------------------------------------------------------------
@@ -239,8 +225,21 @@ def port_hydrographic_agent(
     tide = port.tidal_surge_offset_m
     threshold = port.safe_clearance_m
     ukc = round(depth + tide - draft, 2)
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    marine = get_all_marine_data(req.lat, req.lon)
+    sst = float(marine["sst_celsius"])
+    wave = float(marine["wave_height_m"])
+    current = float(marine["ocean_current_ms"])
+
+    ring = get_geofence_ring()
+    nearest_nm, _ = _nearest_imbl_segment_nm(req.lat, req.lon, ring)
+    nearest_nm = round(nearest_nm, 2)
 
     evidence: list[str] = [
+        f"SST: {sst}C from Open-Meteo Marine Live",
+        f"Wave: {wave}m from Open-Meteo Marine Live",
+        f"IMBL: {nearest_nm} NM from Haversine geometry",
         f"Layer-1 UKC: draft entity={entities.get('draft') if entities else None}, "
         f"request draft={req.draft} -> used {draft}m",
         f"Port resolved: {port.port_name} (channel {depth}m, tide {tide}m, "
@@ -255,12 +254,17 @@ def port_hydrographic_agent(
         "user_draft_m": draft,
         "ukc_m": ukc,
         "threshold_min_ukc_m": threshold,
+        "sst_celsius": sst,
+        "wave_height_m": wave,
+        "ocean_current_ms": current,
+        "data_source": marine["source"],
     }
 
     if ukc < threshold:
         evidence.append(f"UKC {ukc}m < minimum {threshold}m -> CRITICAL grounding risk")
         return AgentDecisionResponse(
             status="CRITICAL",
+            alert_level="CRITICAL",
             agent_name="PORT & NAVIGATION AGENT",
             advisory_en=(
                 f"Critical: Under-Keel Clearance at {port.port_name} is only {ukc}m. "
@@ -273,7 +277,13 @@ def port_hydrographic_agent(
                 f"ஆழம், {tide} மீட்டர் அலை நிலையில் குறைந்தபட்ச {threshold} மீட்டர் "
                 f"இடைவெளி இல்லை. கால்வாயில் செல்ல வேண்டாம்."
             ),
+            sst_celsius=sst,
+            wave_height_m=wave,
+            ocean_current_ms=current,
+            data_source=marine["source"],
+            data_timestamp=now_ts,
             metrics=metrics,
+            evidence=evidence,
             evidence_trace=evidence,
         )
 
@@ -281,6 +291,7 @@ def port_hydrographic_agent(
         evidence.append(f"UKC {ukc}m within 2x safety band -> CAUTION")
         return AgentDecisionResponse(
             status="CAUTION",
+            alert_level="CAUTION",
             agent_name="PORT & NAVIGATION AGENT",
             advisory_en=(
                 f"Caution: UKC at {port.port_name} is {ukc}m — above the {threshold}m "
@@ -292,13 +303,20 @@ def port_hydrographic_agent(
                 f"குறைந்தபட்ச {threshold} மீட்டருக்கு மேல் உள்ளது, ஆனால் பாதுகாப்பான "
                 f"வரம்புக்குள் மட்டுமே. மெதுவாகவும் பைலட் உதவியுடனும் செல்லவும்."
             ),
+            sst_celsius=sst,
+            wave_height_m=wave,
+            ocean_current_ms=current,
+            data_source=marine["source"],
+            data_timestamp=now_ts,
             metrics=metrics,
+            evidence=evidence,
             evidence_trace=evidence,
         )
 
     evidence.append(f"UKC {ukc}m >= 2x threshold -> SAFE to navigate")
     return AgentDecisionResponse(
         status="SAFE",
+        alert_level="SAFE",
         agent_name="PORT & NAVIGATION AGENT",
         advisory_en=(
             f"Safe: Under-Keel Clearance at {port.port_name} is {ukc}m with a "
@@ -309,9 +327,17 @@ def port_hydrographic_agent(
             f"{draft} மீட்டர் பாரத்திற்கு கால்வாய் பயணத்திற்கு தகுதியானது. "
             f"பாதுகாப்பான வேகத்தில் செல்லுங்கள்."
         ),
+        sst_celsius=sst,
+        wave_height_m=wave,
+        ocean_current_ms=current,
+        data_source=marine["source"],
+        data_timestamp=now_ts,
         metrics=metrics,
+        evidence=evidence,
         evidence_trace=evidence,
     )
+
+
 # ---------------------------------------------------------------------------
 # Agent: Coastal Hazard — IMBL proximity from the geofence_boundaries table.
 # ---------------------------------------------------------------------------
@@ -324,8 +350,17 @@ def coastal_hazard_agent(
     nearest_nm, seg_idx = _nearest_imbl_segment_nm(req.lat, req.lon, ring)
     nearest_nm = round(nearest_nm, 2)
     inside = _point_in_polygon(req.lat, req.lon, ring)
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    marine = get_all_marine_data(req.lat, req.lon)
+    sst = float(marine["sst_celsius"])
+    wave = float(marine["wave_height_m"])
+    current = float(marine["ocean_current_ms"])
 
     evidence: list[str] = [
+        f"SST: {sst}C from Open-Meteo Marine Live",
+        f"Wave: {wave}m from Open-Meteo Marine Live",
+        f"IMBL: {nearest_nm} NM from Haversine geometry",
         f"IMBL ring loaded from embedded DB: {len(ring)} vertices "
         f"(start {ring[0]}, end {ring[-1]})",
         f"Cross-track distance to nearest IMBL segment #{seg_idx} = {nearest_nm} NM",
@@ -339,12 +374,17 @@ def coastal_hazard_agent(
         "inside_geofence": inside,
         "critical_threshold_nm": IMBL_CRITICAL_NM,
         "warning_threshold_nm": IMBL_WARNING_NM,
+        "sst_celsius": sst,
+        "wave_height_m": wave,
+        "ocean_current_ms": current,
+        "data_source": marine["source"],
     }
 
     if nearest_nm < IMBL_CRITICAL_NM:
         evidence.append(f"Within {IMBL_CRITICAL_NM} NM of IMBL -> CRITICAL")
         return AgentDecisionResponse(
             status="CRITICAL",
+            alert_level="CRITICAL",
             agent_name="Coastal Hazard Agent",
             advisory_en=(
                 f"Critical: your vessel is within {nearest_nm} NM of the IMBL "
@@ -356,7 +396,13 @@ def coastal_hazard_agent(
                 f"{nearest_nm} கடல் மைல் அருகில் உள்ளது. இது இந்திய-இலங்கை "
                 f"சர்வதேச கடல் எல்லை. கடக்க வேண்டாம்; உடனே துறைமுகத்திற்கு திரும்புங்கள்."
             ),
+            sst_celsius=sst,
+            wave_height_m=wave,
+            ocean_current_ms=current,
+            data_source=marine["source"],
+            data_timestamp=now_ts,
             metrics=metrics,
+            evidence=evidence,
             evidence_trace=evidence,
         )
 
@@ -364,6 +410,7 @@ def coastal_hazard_agent(
         evidence.append(f"{nearest_nm} NM within warning band (< {IMBL_WARNING_NM} NM) -> CAUTION")
         return AgentDecisionResponse(
             status="CAUTION",
+            alert_level="CAUTION",
             agent_name="Coastal Hazard Agent",
             advisory_en=(
                 f"Caution: vessel is {nearest_nm} NM from the IMBL boundary. "
@@ -373,13 +420,20 @@ def coastal_hazard_agent(
                 f"எச்சரிக்கை: கப்பல் IMBL எல்லையிலிருந்து {nearest_nm} கடல் மைல் "
                 f"தொலைவில் உள்ளது. எல்லையைக் கடக்க வேண்டாம்."
             ),
+            sst_celsius=sst,
+            wave_height_m=wave,
+            ocean_current_ms=current,
+            data_source=marine["source"],
+            data_timestamp=now_ts,
             metrics=metrics,
+            evidence=evidence,
             evidence_trace=evidence,
         )
 
     evidence.append(f"{nearest_nm} NM beyond warning band -> SAFE")
     return AgentDecisionResponse(
         status="SAFE",
+        alert_level="SAFE",
         agent_name="Coastal Hazard Agent",
         advisory_en=(
             f"Safe: vessel is {nearest_nm} NM from the nearest IMBL segment. "
@@ -389,54 +443,104 @@ def coastal_hazard_agent(
             f"பாதுகாப்பானது: கப்பல் IMBL எல்லையிலிருந்து {nearest_nm} கடல் மைல் "
             f"தொலைவில் உள்ளது. எல்லை அருகாமை ஆபத்து இல்லை."
         ),
+        sst_celsius=sst,
+        wave_height_m=wave,
+        ocean_current_ms=current,
+        data_source=marine["source"],
+        data_timestamp=now_ts,
         metrics=metrics,
+        evidence=evidence,
         evidence_trace=evidence,
     )
+
+
 # ---------------------------------------------------------------------------
-# Agent: Fishery & Safety — live RasterEngine PFZ + compass vector.
+# Agent: Fishery & Safety — live Open-Meteo marine data + compass vector.
 # ---------------------------------------------------------------------------
 def fishery_safety_agent(
     req: UserQueryRequest,
     entities: Optional[dict] = None,
 ) -> AgentDecisionResponse:
-    """Pull live SST / chlorophyll / PFZ and compute the safe navigation vector."""
-    ocean = RASTER.extract_ocean_data(req.lat, req.lon)
+    """Pull live Open-Meteo marine data, compute PFZ, and evaluate safety."""
+    marine = get_all_marine_data(req.lat, req.lon)
+    sst = float(marine["sst_celsius"])
+    wave = float(marine["wave_height_m"])
+    current = float(marine["ocean_current_ms"])
+    source = marine.get("source", "OPEN_METEO_MARINE_LIVE")
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Real IMBL distance from Haversine geometry
+    ring = get_geofence_ring()
+    imbl_nm, seg_idx = _nearest_imbl_segment_nm(req.lat, req.lon, ring)
+    imbl_nm = round(imbl_nm, 2)
+
+    # Real SST for PFZ calculation:
+    # - SST 26-30C = optimal fishing (score 1.0)
+    # - SST 30-32C = warm but fishable (score 0.7)
+    # - SST > 32C = too warm (score 0.3)
+    if 26.0 <= sst <= 30.0:
+        pfz_score = 1.0
+        pfz_status_en = "optimal fishing conditions"
+        pfz_status_ta = "சிறந்த மீன்பிடி சூழல்"
+        pfz_verdict = True
+    elif 30.0 < sst <= 32.0:
+        pfz_score = 0.7
+        pfz_status_en = "warm but fishable conditions"
+        pfz_status_ta = "வெதுவெதுப்பானது ஆனால் மீன்பிடிக்க ஏற்ற சூழல்"
+        pfz_verdict = True
+    else:
+        pfz_score = 0.3
+        pfz_status_en = "too warm for optimal fishing"
+        pfz_status_ta = "மீன்பிடிக்க அதிக வெப்பமானது"
+        pfz_verdict = False
+
+    # Real wave for safety:
+    # - wave < 1.5m = SAFE
+    # - wave 1.5-2.5m = CAUTION
+    # - wave > 2.5m = CRITICAL
+    if wave < 1.5:
+        status = "SAFE"
+    elif wave <= 2.5:
+        status = "CAUTION"
+    else:
+        status = "CRITICAL"
+
     vector = RASTER.calculate_safe_vector(
         req.lat, req.lon, PFZ_TARGET_LAT, PFZ_TARGET_LON
     )
-    sea = _sea_state(req.lat, req.lon)
-    sst = ocean["sst_celsius"]
-    chl = ocean["chlorophyll_mg_m3"]
-    pfz = ocean["is_pfz_gradient"]
-    ml_flag = ocean.get("ml_is_pfz")
-    ml_conf = ocean.get("ml_confidence")
-    sst_grad = ocean.get("sst_gradient_c_per_deg", 0.0)
-    chl_grad = ocean.get("chl_gradient_mg_m3_per_deg", 0.0)
-    pfz_verdict = ml_flag if ml_flag is not None else pfz
-    wave = sea["wave_height_m"]
     bearing = vector["bearing_degrees"]
     dist_km = vector["distance_km"]
     dist_nm = vector["distance_nm"]
 
+    evidence = [
+        f"SST: {sst}C from Open-Meteo Marine Live",
+        f"Wave: {wave}m from Open-Meteo Marine Live",
+        f"IMBL: {imbl_nm} NM from Haversine geometry",
+    ]
+
     metrics = {
-        "sst_celsius": round(sst, 2),
-        "chlorophyll_mg_m3": round(chl, 3),
-        "is_pfz_gradient": pfz,
+        "sst_celsius": sst,
+        "wave_height_m": wave,
+        "wave_period_s": marine.get("wave_period_s"),
+        "wind_knots": marine.get("wind_knots") or marine.get("wind_speed_knots"),
+        "wind_speed_knots": marine.get("wind_speed_knots") or marine.get("wind_knots"),
+        "gust_knots": marine.get("gust_knots"),
+        "ocean_current_ms": current,
+        "wave_direction_deg": marine.get("wave_direction_deg"),
+        "swell_height_m": marine.get("swell_height_m"),
+        "max_wave_24h": marine.get("max_wave_24h"),
+        "pfz_score": pfz_score,
+        "pfz_condition": pfz_status_en,
         "pfz_verdict": pfz_verdict,
-        "ml_is_pfz": ml_flag,
-        "ml_confidence": ml_conf,
-        "sst_gradient_c_per_deg": round(sst_grad, 4),
-        "chl_gradient_mg_m3_per_deg": round(chl_grad, 4),
-        "raster_source": ocean["source"],
+        "nearest_imbl_distance_nm": imbl_nm,
         "target_lat": PFZ_TARGET_LAT,
         "target_lon": PFZ_TARGET_LON,
         "bearing_degrees": bearing,
         "distance_km": dist_km,
         "distance_nm": dist_nm,
-        "wave_height_m": wave,
-        "wind_speed_knots": sea["wind_speed_knots"],
-        "sea_state_source": sea.get("source", "synthetic_model"),
+        "data_source": source,
     }
+
     bearing_vector = {
         "from": [req.lat, req.lon],
         "to": [PFZ_TARGET_LAT, PFZ_TARGET_LON],
@@ -444,81 +548,56 @@ def fishery_safety_agent(
         "distance_km": dist_km,
     }
 
-    evidence: list[str] = [
-        f"RasterEngine SST at ({req.lat}, {req.lon}) = {sst:.2f} degC "
-        f"(source {ocean['source']})",
-        f"RasterEngine chlorophyll = {chl:.3f} mg/m3",
-        f"PFZ gradient rule [0.2-2.0 mg/m3, 26-30.5 degC, dSST>0.5 degC]: {pfz}",
-        f"Spatial fronts: |grad SST| {sst_grad:.3f} degC/deg, |grad chl| {chl_grad:.3f} mg/m3/deg",
-        (
-            f"ML PFZ classifier: {ml_flag} (confidence {ml_conf:.3f})"
-            if ml_flag is not None
-            else "ML PFZ classifier unavailable (model artefact missing)"
-        ),
-        f"PFZ verdict (ML-priority): {pfz_verdict}",
-        f"Compass vector to PFZ {PFZ_TARGET_LAT},{PFZ_TARGET_LON}: "
-        f"{bearing} deg / {dist_km} km / {dist_nm} NM",
-        f"Sea state [{sea.get('source', 'synthetic_model')}]: wave {wave}m, wind {sea['wind_speed_knots']} kts",
-    ]
-
-    if wave > WAVE_SAFE_LIMIT_M:
-        evidence.append(f"Wave height {wave}m exceeds safe limit {WAVE_SAFE_LIMIT_M}m -> CRITICAL")
-        return AgentDecisionResponse(
-            status="CRITICAL",
-            agent_name="Fishery & Safety Agent",
-            advisory_en=(
-                f"Critical: wave height is {wave}m, exceeding the 2.0m safe limit. "
-                f"Do not venture out today even with a live PFZ hotspot."
-            ),
-            advisory_ta=(
-                f"முக்கிய எச்சரிக்கை: அலை உயரம் {wave} மீட்டர் — பாதுகாப்பான 2.0 மீட்டர் "
-                f"எல்லையைத் தாண்டியது. PFZ தகவல் இருந்தாலும் இன்று கடலுக்குச் செல்ல வேண்டாம்."
-            ),
-            metrics=metrics,
-            bearing_vector=bearing_vector,
-            evidence_trace=evidence,
+    if status == "CRITICAL":
+        advisory_en = (
+            f"Critical: wave height is {wave}m, exceeding the 2.5m safe limit. "
+            f"Ocean current is {current} m/s. Dangerous sea state — do not venture out to sea today."
+        )
+        advisory_ta = (
+            f"முக்கிய எச்சரிக்கை: அலை உயரம் {wave} மீட்டர் — 2.5 மீட்டர் ஆபத்தான எல்லையைத் தாண்டியது. "
+            f"கடல் நீரோட்டம் {current} மீ/வி. கடல் கொந்தளிப்பாக உள்ளதால் இன்று கடலுக்குச் செல்ல வேண்டாம்."
+        )
+    elif status == "CAUTION":
+        advisory_en = (
+            f"Caution: wave height is {wave}m (1.5-2.5m caution band) and ocean current is {current} m/s. "
+            f"SST is {sst}°C ({pfz_status_en}, PFZ score {pfz_score}). IMBL is {imbl_nm} NM away. "
+            f"Proceed with heightened caution if sailing towards PFZ {bearing}° ({dist_nm} NM)."
+        )
+        advisory_ta = (
+            f"எச்சரிக்கை: அலை உயரம் {wave} மீட்டர் (1.5-2.5 மீ எச்சரிக்கை வரம்பு), கடல் நீரோட்டம் {current} மீ/வி. "
+            f"SST {sst}°C ({pfz_status_ta}, PFZ மதிப்பு {pfz_score}). எல்லை {imbl_nm} கடல் மைல் தொலைவில் உள்ளது. "
+            f"எச்சரிக்கையுடன் செயல்படவும்."
+        )
+    else:  # SAFE
+        advisory_en = (
+            f"Safe to navigate: Wave height is calm at {wave}m (< 1.5m safe threshold) with ocean current {current} m/s. "
+            f"Sea surface temperature is {sst}°C indicating {pfz_status_en} (PFZ score {pfz_score}). "
+            f"Vessel is safely {imbl_nm} NM inside IMBL. Head {bearing}° for {dist_km} km ({dist_nm} NM) to PFZ."
+        )
+        advisory_ta = (
+            f"பாதுகாப்பானது: அலை உயரம் அமைதியாக {wave} மீட்டர் (<1.5 மீ பாதுகாப்பு வரம்பு), கடல் நீரோட்டம் {current} மீ/வி. "
+            f"கடல் மேற்பரப்பு வெப்பநிலை {sst}°C ஆக உள்ளதால் {pfz_status_ta} (PFZ மதிப்பு {pfz_score}). "
+            f"IMBL எல்லை {imbl_nm} கடல் மைல் தொலைவில் பாதுகாப்பாக உள்ளது. PFZ நோக்கி {bearing}° திசையில் {dist_km} கி.மீ ({dist_nm} NM) செல்லுங்கள்."
         )
 
-    if pfz_verdict:
-        evidence.append("PFZ conditions favourable -> SAFE")
-        return AgentDecisionResponse(
-            status="SAFE",
-            agent_name="Fishery & Safety Agent",
-            advisory_en=(
-                f"Fishing is favourable. SST {sst:.2f} degC and chlorophyll "
-                f"{chl:.2f} mg/m3 indicate a thermal-front hotspot. Head "
-                f"{bearing} deg for {dist_km} km ({dist_nm} NM) to the PFZ."
-            ),
-            advisory_ta=(
-                f"மீன்பிடிப்பு சாதகமாக உள்ளது. SST {sst:.2f}°C மற்றும் குளோரோபில் "
-                f"{chl:.2f} mg/m³ வெப்ப-முனை இருப்பைக் காட்டுகின்றன. PFZ நோக்கி "
-                f"{bearing}° திசையில் {dist_km} கி.மீ ({dist_nm} NM) செல்லுங்கள்."
-            ),
-            metrics=metrics,
-            bearing_vector=bearing_vector,
-            evidence_trace=evidence,
-        )
-
-    evidence.append("PFZ conditions weak -> CAUTION (fishing may be unproductive)")
     return AgentDecisionResponse(
-        status="CAUTION",
+        status=status,
+        alert_level=status,
         agent_name="Fishery & Safety Agent",
-        advisory_en=(
-            f"Caution: PFZ conditions at your position are weak "
-            f"(SST {sst:.2f} degC, chlorophyll {chl:.2f} mg/m3). Fishing may be "
-            f"unproductive; consider the nearby hotspot at {bearing} deg, "
-            f"{dist_km} km away."
-        ),
-        advisory_ta=(
-            f"எச்சரிக்கை: உங்கள் இடத்தில் PFZ நிலை பலவீனமாக உள்ளது "
-            f"(SST {sst:.2f}°C, குளோரோபில் {chl:.2f} mg/m³). மீன்பிடிப்பு "
-            f"அதிக மகசூல் தராது; {bearing}° திசையில் {dist_km} கி.மீ தொலைவில் "
-            f"உள்ள நெருக்கடிப் பகுதியை முயற்சிக்கவும்."
-        ),
+        advisory_en=advisory_en,
+        advisory_ta=advisory_ta,
+        sst_celsius=sst,
+        wave_height_m=wave,
+        ocean_current_ms=current,
+        data_source=source,
+        data_timestamp=now_ts,
+        evidence=evidence,
+        evidence_trace=evidence,
         metrics=metrics,
         bearing_vector=bearing_vector,
-        evidence_trace=evidence,
     )
+
+
 # ---------------------------------------------------------------------------
 # Agent: Situational Awareness — dynamic contextual fallback (Layer 3).
 # ---------------------------------------------------------------------------
@@ -526,44 +605,40 @@ def situational_awareness_agent(
     req: UserQueryRequest,
     entities: Optional[dict] = None,
 ) -> AgentDecisionResponse:
-    """Dynamically composed situational advisory — never a static mock."""
-    ocean = RASTER.extract_ocean_data(req.lat, req.lon)
-    sea = _sea_state(req.lat, req.lon)
+    """Dynamically composed situational advisory from live marine data."""
+    marine = get_all_marine_data(req.lat, req.lon)
+    sst = float(marine["sst_celsius"])
+    wave = float(marine["wave_height_m"])
+    current = float(marine["ocean_current_ms"])
+    wind = float(marine.get("wind_speed_knots") or marine.get("wind_knots") or 0.0)
+    gust = float(marine.get("gust_knots") or 0.0)
+    period = float(marine.get("wave_period_s") or 0.0)
+    source = marine.get("source", "OPEN_METEO_MARINE_LIVE")
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     port, port_km = _find_nearest_port(req.lat, req.lon)
-    sst = ocean["sst_celsius"]
-    chl = ocean["chlorophyll_mg_m3"]
-    pfz = ocean["is_pfz_gradient"]
-    ml_flag = ocean.get("ml_is_pfz")
-    ml_conf = ocean.get("ml_confidence")
-    sst_grad = ocean.get("sst_gradient_c_per_deg", 0.0)
-    chl_grad = ocean.get("chl_gradient_mg_m3_per_deg", 0.0)
-    pfz_verdict = ml_flag if ml_flag is not None else pfz
-    wave = sea["wave_height_m"]
-    wind = sea["wind_speed_knots"]
+    ring = get_geofence_ring()
+    imbl_nm, _ = _nearest_imbl_segment_nm(req.lat, req.lon, ring)
+    imbl_nm = round(imbl_nm, 2)
 
-    metrics = {
-        "sst_celsius": round(sst, 2),
-        "chlorophyll_mg_m3": round(chl, 3),
-        "is_pfz_gradient": pfz,
-        "pfz_verdict": pfz_verdict,
-        "ml_is_pfz": ml_flag,
-        "ml_confidence": ml_conf,
-        "sst_gradient_c_per_deg": round(sst_grad, 4),
-        "chl_gradient_mg_m3_per_deg": round(chl_grad, 4),
-        "raster_source": ocean["source"],
-        "wave_height_m": wave,
-        "wave_period_s": sea["wave_period_s"],
-        "wind_speed_knots": wind,
-        "gust_knots": sea["gust_knots"],
-        "sea_state_source": sea.get("source", "synthetic_model"),
-        "nearest_port": port.port_name if port else None,
-        "nearest_port_distance_km": round(port_km, 1) if port else None,
-        "system_ready": True,
-    }
+    # Real SST PFZ score
+    if 26.0 <= sst <= 30.0:
+        pfz_score = 1.0
+        pfz_verdict = True
+        pfz_text = "optimal PFZ conditions"
+    elif 30.0 < sst <= 32.0:
+        pfz_score = 0.7
+        pfz_verdict = True
+        pfz_text = "warm but fishable conditions"
+    else:
+        pfz_score = 0.3
+        pfz_verdict = False
+        pfz_text = "warm conditions"
 
-    if wave > WAVE_SAFE_LIMIT_M or wind >= 25.0:
+    # Real wave safety
+    if wave > 2.5 or wind >= 25.0:
         status = "CRITICAL"
-    elif wave > 1.5 or wind >= 18.0:
+    elif wave >= 1.5 or wind >= 18.0:
         status = "CAUTION"
     else:
         status = "SAFE"
@@ -572,37 +647,52 @@ def situational_awareness_agent(
         f"closest port {port.port_name} {round(port_km, 1)} km away"
         if port else "no seeded port within range"
     )
-    pfz_text = ("a live PFZ hotspot is present" if pfz_verdict else "no active PFZ hotspot nearby") + (f" (ML confidence {ml_conf:.2f})" if ml_conf is not None else "")
 
     evidence: list[str] = [
-        "Layer 3 contextual fallback: no deterministic/fuzzy domain intent matched; "
-        "assembled a dynamic situational awareness advisory",
-        f"Live RasterEngine telemetry: SST {sst:.2f} degC, chl {chl:.3f} mg/m3 "
-        f"(source {ocean['source']}), {pfz_text}",
-        f"Sea state [{sea.get('source', 'synthetic_model')}]: wave {wave}m, wind {wind} kts "
-        f"(gust {sea['gust_knots']} kts), period {sea['wave_period_s']}s",
-        f"Local DB port lookup: {port_text}",
-        f"System readiness: engine online, embedded DB online, NLU 3-layer pipeline active",
+        f"SST: {sst}C from Open-Meteo Marine Live",
+        f"Wave: {wave}m from Open-Meteo Marine Live",
+        f"IMBL: {imbl_nm} NM from Haversine geometry",
+        f"Ocean Current: {current} m/s from Open-Meteo Marine Live",
+        f"Nearest Port: {port_text}",
     ]
+
+    metrics = {
+        "sst_celsius": sst,
+        "wave_height_m": wave,
+        "ocean_current_ms": current,
+        "wave_period_s": period,
+        "wind_speed_knots": wind,
+        "gust_knots": gust,
+        "data_source": source,
+        "nearest_imbl_distance_nm": imbl_nm,
+        "nearest_port": port.port_name if port else None,
+        "nearest_port_distance_km": round(port_km, 1) if port else None,
+        "pfz_score": pfz_score,
+        "system_ready": True,
+    }
 
     return AgentDecisionResponse(
         status=status,
+        alert_level=status,
         agent_name="Situational Awareness Agent",
         advisory_en=(
             f"Situational awareness at {req.lat:.3f}N, {req.lon:.3f}E — sea state: "
-            f"wave {wave}m, wind {wind} kts (gust {sea['gust_knots']} kts). "
-            f"Sea surface {sst:.2f} degC, chlorophyll {chl:.2f} mg/m3; {pfz_text}; "
-            f"{port_text}. "
-            f"Status: {'CAUTION - monitor conditions' if status == 'CAUTION' else 'CRITICAL - stay ashore' if status == 'CRITICAL' else 'nominal - proceed with standard precautions'}."
+            f"wave {wave}m, current {current} m/s. "
+            f"Sea surface temperature {sst}°C ({pfz_text}); {port_text}. "
+            f"Status: {'CAUTION - monitor conditions' if status == 'CAUTION' else 'CRITICAL - stay ashore' if status == 'CRITICAL' else 'SAFE - standard navigation permitted'}."
         ),
         advisory_ta=(
             f"சூழ்நிலை அறிவிப்பு: {req.lat:.3f}°N, {req.lon:.3f}°E — கடல் நிலை: "
-            f"அலை {wave} மீ, காற்று {wind} நாட். SST {sst:.2f}°C, குளோரோபில் "
-            f"{chl:.2f} mg/m³; {('PFZ அருகில் உள்ளது' if pfz else 'PFZ இல்லை')}; "
-            f"{port_text}. மேலும், "
-            f"{'வானிலை எச்சரிக்கையுடன் செயல்படுங்கள்' if status == 'CAUTION' else 'ஆபத்து — கரையில் இருங்கள்' if status == 'CRITICAL' else 'நிலை சாதாரணம் — வழக்கமான முன்னெச்சரிக்கை' }."
+            f"அலை {wave} மீ, நீரோட்டம் {current} மீ/வி. SST {sst}°C; {port_text}. "
+            f"நிலை: {'எச்சரிக்கையுடன் செயல்படுங்கள்' if status == 'CAUTION' else 'ஆபத்து — கரையில் இருங்கள்' if status == 'CRITICAL' else 'பாதுகாப்பானது — வழக்கம் போல் செல்லலாம்'}."
         ),
+        sst_celsius=sst,
+        wave_height_m=wave,
+        ocean_current_ms=current,
+        data_source=source,
+        data_timestamp=now_ts,
         metrics=metrics,
+        evidence=evidence,
         evidence_trace=evidence,
     )
 

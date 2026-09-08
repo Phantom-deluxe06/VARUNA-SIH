@@ -60,23 +60,44 @@ class SimpleQueryRequest(BaseModel):
     """Demo-friendly payload for ``POST /query``.
 
     Accepts the shape used by the dashboard / demo tooling and adapts it to the
-    canonical :class:`UserQueryRequest`.  Vessel context defaults to Rameswaram
+    canonical :class:`UserQueryRequest`. Vessel context defaults to Rameswaram
     so a bare ``{"query": "..."}`` still works during a live demo.
     """
 
-    query: str
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    query: str = Field(default="can I go fishing")
     role: str = "fisherman"
-    vessel_lat: float = 9.9252
-    vessel_lon: float = 79.3129
-    vessel_draft: Optional[float] = 2.5
+    vessel_lat: Optional[float] = None
+    vessel_lon: Optional[float] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    vessel_draft: Optional[float] = None
+    draft: Optional[float] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            coords = data.get("coordinates")
+            if isinstance(coords, dict):
+                if "lat" not in data and "vessel_lat" not in data:
+                    data["lat"] = coords.get("lat")
+                if "lon" not in data and "vessel_lon" not in data:
+                    data["lon"] = coords.get("lon")
+        return data
 
     def to_user_query(self) -> "UserQueryRequest":
+        effective_lat = self.lat if self.lat is not None else (self.vessel_lat if self.vessel_lat is not None else 9.9252)
+        effective_lon = self.lon if self.lon is not None else (self.vessel_lon if self.vessel_lon is not None else 79.3129)
+        effective_draft = self.draft if self.draft is not None else (self.vessel_draft if self.vessel_draft is not None else 2.5)
         return UserQueryRequest(
             query=self.query,
             user_role=ROLE_ALIASES.get(self.role.strip().lower(), "fisherman"),
-            lat=self.vessel_lat,
-            lon=self.vessel_lon,
-            draft=self.vessel_draft,
+            lat=effective_lat,
+            lon=effective_lon,
+            draft=effective_draft,
         )
 
 
@@ -100,12 +121,21 @@ class BearingVector(BaseModel):
 
 
 class AgentDecisionResponse(BaseModel):
-    """Response contract — exactly mirrors ``frontend/src/lib/types.ts``."""
+    """Response contract — mirrors frontend types and contains live marine telemetry."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     status: Status = Field(..., description="SAFE | CAUTION | CRITICAL")
+    alert_level: Optional[Status] = Field(default=None, description="SAFE | CAUTION | CRITICAL")
     agent_name: str = Field(..., description="Agent that handled the query")
     advisory_en: str = Field(..., description="Advisory text in English")
     advisory_ta: str = Field(..., description="Advisory text in Tamil")
+    sst_celsius: Optional[float] = Field(default=None, description="Sea surface temperature in Celsius")
+    wave_height_m: Optional[float] = Field(default=None, description="Wave height in metres")
+    ocean_current_ms: Optional[float] = Field(default=None, description="Ocean current velocity in m/s")
+    data_source: Optional[str] = Field(default="OPEN_METEO_MARINE_LIVE", description="Data source")
+    data_timestamp: Optional[str] = Field(default=None, description="Data timestamp in ISO format")
+    evidence: list[str] = Field(default_factory=list, description="Step-by-step evidence list")
     metrics: dict = Field(
         default_factory=dict, description="Computed decision metrics"
     )
@@ -114,5 +144,15 @@ class AgentDecisionResponse(BaseModel):
         description="Compass vector to the target hotspot (when applicable)",
     )
     evidence_trace: list[str] = Field(
-        default_factory=list, description="Step-by-step evidence used by the agent"
+        default_factory=list, description="Step-by-step evidence trace"
     )
+
+    @model_validator(mode="after")
+    def _sync_fields(self) -> "AgentDecisionResponse":
+        if self.alert_level is None:
+            self.alert_level = self.status
+        if not self.evidence and self.evidence_trace:
+            self.evidence = list(self.evidence_trace)
+        elif self.evidence and not self.evidence_trace:
+            self.evidence_trace = list(self.evidence)
+        return self

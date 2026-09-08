@@ -1,11 +1,16 @@
+import json
 import logging
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 logger = logging.getLogger("varuna.main")
 
@@ -77,86 +82,111 @@ def health() -> dict:
     }
 
 
-@app.post("/api/v1/query", response_model=AgentDecisionResponse)
-def handle_query(req: UserQueryRequest) -> AgentDecisionResponse:
-    return route_query(req)
+@app.post("/api/v1/query")
+def handle_query(req: UserQueryRequest):
+    decision = route_query(req)
+    if decision.sst_celsius is None or decision.wave_height_m is None:
+        from app.data.open_meteo import get_all_marine_data
+        m = get_all_marine_data(req.lat, req.lon)
+        decision.sst_celsius = m["sst_celsius"]
+        decision.wave_height_m = m["wave_height_m"]
+        decision.ocean_current_ms = m["ocean_current_ms"]
+        decision.data_source = m["source"]
+    if not decision.data_timestamp:
+        decision.data_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not decision.alert_level:
+        decision.alert_level = decision.status
+    result = decision.model_dump(by_alias=True)
+    return JSONResponse(
+        content=json.loads(
+            json.dumps(result, ensure_ascii=False)
+        )
+    )
 
 
-@app.post("/query", response_model=AgentDecisionResponse)
-def handle_simple_query(req: SimpleQueryRequest) -> AgentDecisionResponse:
-    """Demo-friendly alias of /api/v1/query (Rameswaram defaults)."""
-    return route_query(req.to_user_query())
+@app.post("/query")
+def handle_simple_query(req: SimpleQueryRequest = SimpleQueryRequest()):
+    """Live marine query endpoint (Rameswaram defaults)."""
+    user_req = req.to_user_query()
+    decision = route_query(user_req)
+    if decision.sst_celsius is None or decision.wave_height_m is None:
+        from app.data.open_meteo import get_all_marine_data
+        m = get_all_marine_data(user_req.lat, user_req.lon)
+        decision.sst_celsius = m["sst_celsius"]
+        decision.wave_height_m = m["wave_height_m"]
+        decision.ocean_current_ms = m["ocean_current_ms"]
+        decision.data_source = m["source"]
+    if not decision.data_timestamp:
+        decision.data_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not decision.alert_level:
+        decision.alert_level = decision.status
+    result = decision.model_dump(by_alias=True)
+    return JSONResponse(
+        content=json.loads(
+            json.dumps(result, ensure_ascii=False)
+        )
+    )
 
 
 @app.get("/pfz/latest")
 def pfz_latest() -> dict:
-    """Latest potential-fishing-zone probes, ranked by ML/gradient confidence."""
+    """Latest potential-fishing-zone probes, ranked by live confidence."""
     v_lat, v_lon = _DEFAULT_VESSEL
     zones: list[dict] = []
-    source = "synthetic_model"
+    source = "OPEN_METEO_MARINE_LIVE"
     try:
+        from app.data.open_meteo import get_all_marine_data
+        m = get_all_marine_data(v_lat, v_lon)
+        sst = m["sst_celsius"]
+        # 26-30C: 0.95 conf, 30-32C: 0.85 conf, >32C: 0.65 conf
+        base_conf = 0.95 if 26.0 <= sst <= 30.0 else (0.85 if sst <= 32.0 else 0.65)
         for lat, lon in _PFZ_CANDIDATES:
-            ocean = RASTER.extract_ocean_data(lat, lon)
-            source = ocean.get("source", source)
             vector = RASTER.calculate_safe_vector(v_lat, v_lon, lat, lon)
-            conf = ocean.get("ml_confidence")
-            if conf is None:
-                grad = abs(float(ocean.get("sst_gradient_c_per_deg", 0.0)))
-                base = 0.86 if ocean.get("is_pfz_gradient") else 0.6
-                conf = min(0.95, base + min(0.09, grad * 0.05))
             zones.append(
                 {
                     "lat": lat,
                     "lon": lon,
-                    "confidence": round(float(conf), 2),
+                    "confidence": base_conf,
                     "bearing": round(vector["bearing_degrees"]),
                     "distance_nm": round(vector["distance_nm"], 1),
                 }
             )
         zones.sort(key=lambda z: z["confidence"], reverse=True)
     except Exception:
-        logger.exception("pfz/latest raster path failed - using demo zones")
-        zones = demo_mode.demo_pfz_zones()
-        source = "DEMO_FALLBACK"
+        logger.exception("pfz/latest failed")
     return {"zones": zones, "source": source}
 
 
 @app.get("/vessel/status")
 def vessel_status() -> dict:
-    """Vessel telemetry for the dashboard, enriched from live engine data."""
+    """Vessel telemetry for the dashboard, enriched from live Open-Meteo data."""
     v_lat, v_lon = _DEFAULT_VESSEL
-    status = demo_mode.demo_vessel_status()
-    status["source"] = "DEMO_FALLBACK"
+    from app.data.open_meteo import get_all_marine_data
+    from app.agents import _nearest_imbl_segment_nm
+    from app.db.database import get_geofence_ring
 
-    def _ask(q: str) -> dict:
-        return (
-            route_query(
-                UserQueryRequest(query=q, user_role="fisherman", lat=v_lat, lon=v_lon, draft=2.5)
-            ).metrics
-            or {}
-        )
+    marine = get_all_marine_data(v_lat, v_lon)
+    ring = get_geofence_ring()
+    imbl_nm, _ = _nearest_imbl_segment_nm(v_lat, v_lon, ring)
 
-    try:
-        sea = _ask("what is the current sea state, wave height and wind")
-        if sea.get("wave_height_m") is not None:
-            status["wave_height_m"] = sea["wave_height_m"]
-        if sea.get("wind_speed_knots") is not None:
-            status["wind_knots"] = sea["wind_speed_knots"]
-        if sea.get("sea_state_source"):
-            status["source"] = sea["sea_state_source"]
-    except Exception:
-        logger.exception("vessel/status sea-state enrichment failed")
-    try:
-        border = _ask("how far am I from the maritime border IMBL boundary")
-        if border.get("nearest_imbl_distance_nm") is not None:
-            status["imbl_distance_nm"] = border["nearest_imbl_distance_nm"]
-    except Exception:
-        logger.exception("vessel/status border enrichment failed")
-    return status
+    return {
+        "lat": v_lat,
+        "lon": v_lon,
+        "speed": 0,
+        "heading": 115,
+        "imbl_distance_nm": round(imbl_nm, 2),
+        "wave_height_m": marine["wave_height_m"],
+        "wind_knots": marine.get("wind_knots") or marine.get("wind_speed_knots"),
+        "gust_knots": marine.get("gust_knots"),
+        "wave_period_s": marine.get("wave_period_s"),
+        "sst_celsius": marine["sst_celsius"],
+        "ocean_current_ms": marine["ocean_current_ms"],
+        "source": marine["source"],
+    }
 
 
 @app.post("/whatsapp/webhook")
-def whatsapp_webhook(Body: str = Form("")) -> Response:
+def whatsapp_webhook(Body: str = Form(""), From: str = Form("default")) -> Response:
     """Twilio WhatsApp webhook (same logic as the standalone Flask bot)."""
-    reply = whatsapp_core.handle_message(Body)
+    reply = whatsapp_core.handle_message(Body, phone=From)
     return Response(content=whatsapp_core.twiml(reply), media_type="application/xml")

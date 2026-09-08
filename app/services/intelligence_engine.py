@@ -48,6 +48,13 @@ PORT_ALIASES: dict[str, str] = {
     "tuicorin": "Thoothukudi Port",
 }
 
+FISHING_KEYWORDS: list[str] = [
+    "மீன்", "மீன் எங்க", "மீன் இருக்கு",
+    "மீன்பிடி", "PFZ", "pfz",
+    "fish", "fishing zone", "where to fish",
+    "மண்டலம்", "மீன் மண்டலம்"
+]
+
 INTENT_KEYWORDS: dict[str, list[str]] = {
     "ukc": [
         "draft", "draught", "under keel", "ukc", "channel", "dock", "berth",
@@ -59,9 +66,10 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
         "எல்லை", "இலங்கை", "கடல் எல்லை",
     ],
     "fishing": [
-        "fish", "fishing", "fisher", "hotspot", "pfz", "catch", "tuna",
+        *FISHING_KEYWORDS,
+        "fisher", "hotspot", "catch", "tuna",
         "mackerel", "meen", "sardine", "prawn",
-        "மீன்", "மீன", "மீனவ", "மீன்பிடி", "பிடிக்க",
+        "மீன", "மீனவ", "பிடிக்க",
     ],
     "situational": [
         "weather", "sea state", "wave", "wind", "condition", "advisory",
@@ -145,6 +153,9 @@ def _extract_layer1_entities(query: str) -> dict:
 
 def _layer1_intent(query: str) -> Optional[str]:
     """Keyword-count routing; returns the highest-scoring intent or None."""
+    if any(kw in query or kw.lower() in query.lower() for kw in FISHING_KEYWORDS):
+        return "fishing"
+
     hits = {
         intent: sum(1 for kw in keywords if kw in query)
         for intent, keywords in INTENT_KEYWORDS.items()
@@ -182,14 +193,19 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
     query = (req.query or "").strip()
     entities = _extract_layer1_entities(query)
 
-    intent = _layer1_intent(query.lower()) if query else None
-    layer = "L1"
-    if intent is None:
-        intent = _layer2_intent(query)
-        layer = "L2"
-    if intent is None:
-        intent = "situational"
-        layer = "L3"
+    # Immediate Layer 1 detection: ANY of FISHING_KEYWORDS found in query
+    if query and (any(kw in query or kw.lower() in query.lower() for kw in FISHING_KEYWORDS) or (all(c in "? " for c in query) and req.user_role == "fisherman")):
+        intent = "fishing"
+        layer = "L1"
+    else:
+        intent = _layer1_intent(query.lower()) if query else None
+        layer = "L1"
+        if intent is None:
+            intent = _layer2_intent(query)
+            layer = "L2"
+        if intent is None:
+            intent = "situational"
+            layer = "L3"
 
     handler = AGENT_REGISTRY[intent]
     try:
@@ -207,8 +223,13 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
         f"Extracted entities: {entities or 'none'}",
         f"Vessel context: ({req.lat:.4f}, {req.lon:.4f}), role={req.user_role}",
     ]
+    evidence = decision.evidence if decision.evidence else [*nlu_trace, *decision.evidence_trace]
     decision = decision.model_copy(
-        update={"evidence_trace": [*nlu_trace, *decision.evidence_trace]}
+        update={
+            "evidence": evidence,
+            "evidence_trace": [*nlu_trace, *decision.evidence_trace],
+            "alert_level": decision.alert_level or decision.status,
+        }
     )
 
     # Audit persistence — never breaks the request on failure.

@@ -18,6 +18,8 @@ retrieved the fisherman is told so, in Tamil, rather than shown fake numbers.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
+from typing import Optional
 
 from app.agents import PFZ_TARGET_LAT, PFZ_TARGET_LON, _nearest_imbl_segment_nm, _point_in_polygon
 from app.db.database import get_geofence_ring
@@ -27,6 +29,51 @@ from app.schemas import UserQueryRequest
 from app.services import tamil_engine
 from app.services.intelligence_engine import route_query
 from app.services.raster_service import RasterEngine
+
+# ---------------------------------------------------------------------------
+# In-memory conversation store per phone number.
+# Clears after 2 hours of inactivity.
+# ---------------------------------------------------------------------------
+CONVERSATION_MEMORY: dict = {}
+
+MEMORY_TTL = timedelta(hours=2)
+
+# Contextual queries that refer to the previous answer
+CONTEXT_QUERIES = [
+    "அது எவ்வளவு தூரம்",
+    "how far is that",
+    "அந்த இடம்",
+    "that place",
+    "இன்னும் விவரம்",
+    "tell me more",
+    "safe-ஆ இருக்கா அங்க",
+    "is it safe there",
+]
+
+
+def get_memory(phone: str) -> dict:
+    mem = CONVERSATION_MEMORY.get(phone, {})
+    if mem:
+        # Expire after 2 hours
+        if datetime.now() - mem.get("timestamp", datetime.now()) > MEMORY_TTL:
+            CONVERSATION_MEMORY.pop(phone, None)
+            return {}
+    return mem
+
+
+def save_memory(phone: str, intent: str, data: dict):
+    CONVERSATION_MEMORY[phone] = {
+        "last_intent": intent,
+        "last_data": data,
+        "timestamp": datetime.now(),
+    }
+
+
+def _is_context_query(text: str) -> bool:
+    """True when the message refers back to the previous answer."""
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in CONTEXT_QUERIES)
+
 
 logger = logging.getLogger("varuna.whatsapp")
 
@@ -88,8 +135,13 @@ def _safety_status(wave: float, wind: float, imbl_nm: float) -> str:
     return "SAFE"
 
 
-def _marine_reply(kind: str) -> str:
-    """Build a real-data Tamil reply for one of the five template kinds."""
+def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
+    """Build a real-data Tamil reply for one of the five template kinds.
+
+    When ``data_sink`` is a dict, the PFZ branch fills it with the raw
+    ``distance_nm`` / ``bearing`` / ``safety_status`` values so the caller
+    can store them in :data:`CONVERSATION_MEMORY` for follow-up questions.
+    """
     lat, lon = DEFAULT_LAT, DEFAULT_LON
 
     if kind == "tomorrow":
@@ -137,6 +189,19 @@ def _marine_reply(kind: str) -> str:
         md["sst_c"], md["chl_mg_m3"],
         md["sst_gradient_c_per_deg"], md["chl_gradient_mg_m3_per_deg"],
     )
+    if data_sink is not None:
+        data_sink.update(
+            {
+                "distance_nm": round(float(vector["distance_nm"]), 1),
+                "bearing": round(float(vector["bearing_degrees"]), 1),
+                "safety_status": (
+                    "இன்று மீன் மண்டலம் சுறுசுறுப்பாக உள்ளது "
+                    f"(confidence {round(float(pfz['confidence']), 2)})"
+                    if pfz["is_pfz"]
+                    else "இன்று மீன் மண்டலம் சுறுசுறுப்பாக இல்லை"
+                ),
+            }
+        )
     return tamil_engine.render(
         "pfz",
         sst=md["sst_c"],
@@ -186,8 +251,25 @@ def format_reply(decision) -> str:
     )
 
 
-def handle_message(body: str) -> str:
-    """Map an inbound WhatsApp message to an outbound reply string."""
+def _pfz_followup_reply(mem: dict) -> Optional[str]:
+    """Answer a contextual query from conversation memory, if applicable."""
+    if mem.get("last_intent") != "pfz_query":
+        return None
+    data = mem.get("last_data", {})
+    return (
+        "கடைசியா சொன்ன மீன் மண்டலம்: "
+        f"{data.get('distance_nm')} NM தூரத்தில் "
+        f"{data.get('bearing')}° திசையில் உள்ளது. "
+        f"{data.get('safety_status')}"
+    )
+
+
+def handle_message(body: str, phone: str = "default") -> str:
+    """Map an inbound WhatsApp message to an outbound reply string.
+
+    ``phone`` keys the per-number conversation memory; callers that do not
+    supply it fall back to a shared ``"default"`` slot.
+    """
     text = (body or "").strip()
     if not text:
         return WELCOME_TEXT
@@ -198,11 +280,22 @@ def handle_message(body: str) -> str:
     if key in _HELP_CMDS:
         return HELP_TEXT
 
+    # 0) Contextual follow-ups ("அது எவ்வளவு தூரம்" / "how far is that" ...).
+    if _is_context_query(text):
+        followup = _pfz_followup_reply(get_memory(phone))
+        if followup is not None:
+            return followup
+        # No PFZ context to refer to — fall through to normal classification.
+
     # 1) Canonical fisherman queries -> real-data Tamil templates (no demo).
     kind = tamil_engine.classify(text)
     if kind:
         try:
-            return _marine_reply(kind)
+            sink: dict = {}
+            reply = _marine_reply(kind, data_sink=sink)
+            if sink:
+                save_memory(phone, "pfz_query", sink)
+            return reply
         except LiveDataError:
             logger.warning("WhatsApp %s: live data unavailable", kind)
             return _DATA_UNAVAILABLE_TA
@@ -221,6 +314,13 @@ def handle_message(body: str) -> str:
                 draft=DEFAULT_DRAFT,
             )
         )
+        metrics = decision.metrics or {}
+        response_data = {
+            "distance_nm": metrics.get("distance_nm"),
+            "bearing": metrics.get("bearing_degrees"),
+            "safety_status": decision.status,
+        }
+        save_memory(phone, decision.agent_name, response_data)
         return format_reply(decision)
     except Exception:
         logger.exception("WhatsApp free-text query failed")
