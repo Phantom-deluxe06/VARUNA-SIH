@@ -116,6 +116,12 @@ def handle_simple_query(req: SimpleQueryRequest = SimpleQueryRequest()):
         role=req.role or "Fisherman",
         phone=getattr(req, "phone", "default")
     )
+    if "status" not in result and "alert_level" in result:
+        result["status"] = result["alert_level"]
+    elif "status" not in result:
+        result["status"] = "SAFE"
+    if "alert_level" not in result:
+        result["alert_level"] = result["status"]
     return JSONResponse(
         content=json.loads(
             json.dumps(result, ensure_ascii=False)
