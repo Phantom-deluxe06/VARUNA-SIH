@@ -1,5 +1,14 @@
 fastapi
 uvicorn
 pydantic
+
+# --- Satellite EO & Raster Engine (lazily-imported scientific stack) -----------
+numpy
+xarray
+netCDF4
+scikit-learn
+joblib
+
+# --- Realtime / AIS ingestion -------------------------------------------------
 websockets>=12.0
 pyais>=2.7

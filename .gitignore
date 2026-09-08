@@ -1,0 +1,18 @@
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+
+# --- VARUNA embedded SQLite artifacts ---------------------------------------
+app/db/varuna.db
+app/db/varuna.db-wal
+app/db/varuna.db-shm
+
+# --- Node / Next.js ----------------------------------------------------------
+node_modules/
+.next/
+out/
+
+# --- VARUNA generated ML / satellite artefacts -------------------------------
+app/data/satellite/*.nc
+app/ml/pfz_model.joblib
