@@ -17,3 +17,8 @@ pyais>=2.7
 flask
 twilio
 python-multipart
+
+# --- Optional: Copernicus Marine as PRIMARY chlorophyll source ---------------
+# Needs a free CMEMS account (COPERNICUSMARINE_SERVICE_USERNAME / _PASSWORD).
+# Dormant without it -- NOAA ERDDAP remains the working key-less source.
+#   pip install copernicusmarine

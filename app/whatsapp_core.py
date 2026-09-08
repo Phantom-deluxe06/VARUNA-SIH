@@ -1,20 +1,36 @@
 """Shared WhatsApp advisory logic.
 
 Single source of truth used by BOTH the standalone Flask bot
-(``app/whatsapp_bot.py``) and the FastAPI endpoint
-(``POST /whatsapp/webhook`` in ``app/main.py``).  It calls the VARUNA
-intelligence engine in-process (no HTTP hop) and formats a clean bilingual
-WhatsApp reply.
+(``app/whatsapp_bot.py``) and the FastAPI endpoint (``POST /whatsapp/webhook``
+in ``app/main.py``).
+
+Every reply is built from **real** data:
+
+* waves / wind      -> Open-Meteo        (``app.data.ocean_fetcher``)
+* SST / chlorophyll -> NOAA ERDDAP / Copernicus
+* PFZ verdict       -> INCOIS rule + offline ML  (``compute_pfz``)
+* IMBL distance     -> great-circle geometry vs the treaty ring
+
+There is **no demo/mock fallback** in this path — if live data cannot be
+retrieved the fisherman is told so, in Tamil, rather than shown fake numbers.
 """
 
 from __future__ import annotations
 
 import logging
 
+from app.agents import PFZ_TARGET_LAT, PFZ_TARGET_LON, _nearest_imbl_segment_nm, _point_in_polygon
+from app.db.database import get_geofence_ring
+from app.data.open_meteo import LiveDataError
+from app.data.ocean_fetcher import compute_pfz, get_marine_data, get_tomorrow_forecast
 from app.schemas import UserQueryRequest
+from app.services import tamil_engine
 from app.services.intelligence_engine import route_query
+from app.services.raster_service import RasterEngine
 
 logger = logging.getLogger("varuna.whatsapp")
+
+_RASTER = RasterEngine()
 
 # Default vessel context — Rameswaram fishing grounds.
 DEFAULT_LAT = 9.9252
@@ -28,37 +44,109 @@ WELCOME_TEXT = (
     "வணக்கம்! நான் வருணா — உங்கள் கடல் பாதுகாப்பு உதவியாளர்.\n"
     "Welcome! I am VARUNA, your marine safety assistant.\n\n"
     "இதை அனுப்புங்கள் / Send:\n"
-    "• *pfz* / *மீன்* — மீன் பிடிக்கும் இடம் / fishing zone\n"
-    "• *safe* / *பாதுகாப்பு* — கடல் நிலை / safety check\n"
-    "• *border* / *எல்லை* — எல்லைக்கோடு தூரம் / IMBL check\n"
-    "• *help* / *உதவி* — உதவி பட்டியல்\n\n"
+    "• *மீன் எங்க இருக்கு* — மீன் மண்டலம் / fishing zone\n"
+    "• *கடல் safe-ஆ இருக்கா* — கடல் பாதுகாப்பு / safety\n"
+    "• *எல்லை எவ்வளவு தூரம்* — IMBL தூரம்\n"
+    "• *அலை உயரம் என்ன* — அலை நிலை / wave height\n"
+    "• *நாளைக்கு போகலாமா* — நாளைய கணிப்பு / tomorrow\n\n"
     "அல்லது நேரடியாக கேளுங்கள் / Or just ask a question."
 )
 
 HELP_TEXT = (
     "🌊 *VARUNA — உதவி / Commands*\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "*pfz* அல்லது *மீன்*  →  அருகில் உள்ள மீன் மண்டலம்\n"
-    "*safe* அல்லது *பாதுகாப்பு*  →  கடல் பயண பாதுகாப்பு\n"
-    "*border* அல்லது *எல்லை*  →  சர்வதேச கடல் எல்லை தூரம்\n"
-    "*hi* அல்லது *வணக்கம்*  →  தொடக்க செய்தி\n"
+    "*மீன் எங்க இருக்கு*  →  அருகிலுள்ள மீன் மண்டலம் (PFZ)\n"
+    "*கடல் safe-ஆ இருக்கா*  →  கடல் பயண பாதுகாப்பு\n"
+    "*எல்லை எவ்வளவு தூரம்*  →  சர்வதேச கடல் எல்லை தூரம்\n"
+    "*அலை உயரம் என்ன*  →  தற்போதைய அலை உயரம்\n"
+    "*நாளைக்கு போகலாமா*  →  நாளைய கடல் கணிப்பு\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "எந்த கேள்வியையும் தமிழில் அல்லது ஆங்கிலத்தில் அனுப்பலாம்.\n"
-    "You can send any question in Tamil or English."
+    "தரவு: NOAA ERDDAP + Open-Meteo (நேரடி) · demo இல்லை."
 )
 
-_WELCOME_CMDS = {"hi", "hello", "hey", "வணக்கம்", "start"}
-_HELP_CMDS = {"help", "menu", "உதவி"}
-_COMMAND_QUERIES = {
-    "pfz": "Where is the best fishing zone today?",
-    "மீன்": "Where is the best fishing zone today?",
-    "fish": "Where is the best fishing zone today?",
-    "safe": "Is it safe to sail right now?",
-    "safety": "Is it safe to sail right now?",
-    "பாதுகாப்பு": "Is it safe to sail right now?",
-    "border": "How far am I from the maritime border IMBL?",
-    "எல்லை": "How far am I from the maritime border IMBL?",
-}
+_WELCOME_CMDS = {"hi", "hello", "hey", "வணக்கம்", "start", "menu"}
+_HELP_CMDS = {"help", "commands", "உதவி"}
+
+_DATA_UNAVAILABLE_TA = (
+    "⚠️ தற்போது நேரடி கடல் தரவு கிடைக்கவில்லை (இணைய இணைப்பைச் சரிபார்க்கவும்). "
+    "சிறிது நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.\n"
+    "_Live marine data is unavailable right now — please retry shortly._"
+)
+
+
+def _imbl_state(lat: float, lon: float) -> tuple[float, bool]:
+    ring = get_geofence_ring()
+    nm, _ = _nearest_imbl_segment_nm(lat, lon, ring)
+    return round(nm, 2), _point_in_polygon(lat, lon, ring)
+
+
+def _safety_status(wave: float, wind: float, imbl_nm: float) -> str:
+    if (wave is not None and wave > 2.0) or (wind is not None and wind >= 25.0) or imbl_nm < 2.0:
+        return "CRITICAL"
+    if (wave is not None and wave > 1.5) or (wind is not None and wind >= 18.0) or imbl_nm < 5.0:
+        return "CAUTION"
+    return "SAFE"
+
+
+def _marine_reply(kind: str) -> str:
+    """Build a real-data Tamil reply for one of the five template kinds."""
+    lat, lon = DEFAULT_LAT, DEFAULT_LON
+
+    if kind == "tomorrow":
+        fc = get_tomorrow_forecast(lat, lon)  # raises LiveDataError -> handled by caller
+        return tamil_engine.render(
+            "tomorrow",
+            date=fc["date"],
+            wave=fc["wave_height_m"],
+            wind=fc.get("wind_speed_knots"),
+            gust=fc.get("gust_knots"),
+            source_label="Open-Meteo forecast",
+        )
+
+    if kind == "border":
+        imbl_nm, inside = _imbl_state(lat, lon)
+        status = "CRITICAL" if (inside or imbl_nm < 2) else "CAUTION" if imbl_nm < 5 else "SAFE"
+        return tamil_engine.render(
+            "border", imbl_nm=imbl_nm, inside=inside, status=status,
+            source_label="Haversine geometry (treaty IMBL)",
+        )
+
+    md = get_marine_data(lat, lon)
+    wave = md["wave_height_m"]
+    wind = md["wind_knots"]
+    if wave is None:
+        raise LiveDataError("no live wave data")
+
+    if kind == "wave":
+        return tamil_engine.render(
+            "wave", wave=wave, period=md.get("wave_period_s"), wind=wind,
+            source_label=md["source_label"],
+        )
+
+    if kind == "safety":
+        imbl_nm, _ = _imbl_state(lat, lon)
+        status = _safety_status(wave, wind, imbl_nm)
+        return tamil_engine.render(
+            "safety", wave=wave, wind=wind, gust=md.get("gust_knots"),
+            imbl_nm=imbl_nm, status=status, source_label=md["source_label"],
+        )
+
+    # kind == "pfz"
+    vector = _RASTER.calculate_safe_vector(lat, lon, PFZ_TARGET_LAT, PFZ_TARGET_LON)
+    pfz = compute_pfz(
+        md["sst_c"], md["chl_mg_m3"],
+        md["sst_gradient_c_per_deg"], md["chl_gradient_mg_m3_per_deg"],
+    )
+    return tamil_engine.render(
+        "pfz",
+        sst=md["sst_c"],
+        chl=md["chl_mg_m3"],
+        bearing=vector["bearing_degrees"],
+        distance_nm=vector["distance_nm"],
+        is_pfz=pfz["is_pfz"],
+        confidence=pfz["confidence"],
+        source_label=md["source_label"],
+    )
 
 
 def _fmt(value, suffix: str = "") -> str:
@@ -70,36 +158,31 @@ def _fmt(value, suffix: str = "") -> str:
 
 
 def format_reply(decision) -> str:
-    """Render an ``AgentDecisionResponse`` into the WhatsApp advisory block."""
+    """Render a free-text ``AgentDecisionResponse`` into a WhatsApp block."""
     m = decision.metrics or {}
-
     pfz_nm = m.get("distance_nm")
     pfz_bearing = m.get("bearing_degrees")
     if pfz_nm is None and decision.bearing_vector is not None:
         pfz_nm = round(decision.bearing_vector.distance_km / 1.852, 1)
         pfz_bearing = decision.bearing_vector.bearing_degrees
-
-    pfz_line = (
-        f"{_fmt(pfz_nm)} NM at {_fmt(pfz_bearing)}°"
-        if pfz_nm is not None
-        else "N/A"
-    )
     wave = m.get("wave_height_m")
     wind = m.get("wind_speed_knots")
     imbl = m.get("nearest_imbl_distance_nm")
+    src = m.get("sea_state_source") or m.get("raster_source") or "engine"
 
     return (
         "🌊 *VARUNA Maritime Advisory*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         f"📍 *Location:* {LOCATION_LABEL}\n"
         f"⚠️ *Status:* {decision.status}\n"
-        f"🐟 *Nearest PFZ:* {pfz_line}\n"
+        f"🐟 *Nearest PFZ:* {(_fmt(pfz_nm) + ' NM at ' + _fmt(pfz_bearing) + '°') if pfz_nm is not None else 'N/A'}\n"
         f"🌊 *Wave Height:* {_fmt(wave, 'm') if wave is not None else 'N/A'}\n"
         f"💨 *Wind:* {_fmt(wind) + ' knots' if wind is not None else 'N/A'}\n"
         f"🚨 *IMBL Distance:* {_fmt(imbl) + ' NM' if imbl is not None else 'N/A'}\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         f"{decision.advisory_ta}\n\n"
-        f"_{decision.advisory_en}_"
+        f"_{decision.advisory_en}_\n"
+        f"📡 தரவு: {src}"
     )
 
 
@@ -115,12 +198,23 @@ def handle_message(body: str) -> str:
     if key in _HELP_CMDS:
         return HELP_TEXT
 
-    query = _COMMAND_QUERIES.get(key, text)
+    # 1) Canonical fisherman queries -> real-data Tamil templates (no demo).
+    kind = tamil_engine.classify(text)
+    if kind:
+        try:
+            return _marine_reply(kind)
+        except LiveDataError:
+            logger.warning("WhatsApp %s: live data unavailable", kind)
+            return _DATA_UNAVAILABLE_TA
+        except Exception:
+            logger.exception("WhatsApp %s handler failed", kind)
+            return _DATA_UNAVAILABLE_TA
 
+    # 2) Free-text -> full NLU engine (still real data; no demo fallback here).
     try:
         decision = route_query(
             UserQueryRequest(
-                query=query,
+                query=text,
                 user_role=DEFAULT_ROLE,
                 lat=DEFAULT_LAT,
                 lon=DEFAULT_LON,
@@ -128,11 +222,9 @@ def handle_message(body: str) -> str:
             )
         )
         return format_reply(decision)
-    except Exception:  # pragma: no cover - last-resort guard
-        logger.exception("WhatsApp query failed")
-        from app.demo_mode import classify_demo_kind, demo_decision
-
-        return format_reply(demo_decision(classify_demo_kind(query)))
+    except Exception:
+        logger.exception("WhatsApp free-text query failed")
+        return _DATA_UNAVAILABLE_TA
 
 
 def twiml(text: str) -> str:

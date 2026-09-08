@@ -104,9 +104,61 @@ class OpenMeteoMarine:
         return result
 
 
+    def get_daily_forecast(self, lat: float, lon: float, day_offset: int = 1) -> dict:
+        """Daily max wave / wind for ``today + day_offset`` (default: tomorrow)."""
+        marine = _get_json(
+            MARINE_URL,
+            {
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "wave_height_max,wave_period_max,swell_wave_height_max",
+                "forecast_days": max(2, day_offset + 1),
+                "timezone": "auto",
+            },
+        )
+        wind = _get_json(
+            FORECAST_URL,
+            {
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "wind_speed_10m_max,wind_gusts_10m_max",
+                "wind_speed_unit": "kn",
+                "forecast_days": max(2, day_offset + 1),
+                "timezone": "auto",
+            },
+        )
+        md = marine.get("daily") or {}
+        wd = wind.get("daily") or {}
+        times = md.get("time") or []
+        if day_offset >= len(times):
+            raise LiveDataError(f"Open-Meteo daily has no day+{day_offset}")
+
+        def _at(series: list, i: int):
+            return series[i] if series and i < len(series) else None
+
+        wave = _at(md.get("wave_height_max"), day_offset)
+        if wave is None:
+            raise LiveDataError("Open-Meteo daily returned no wave_height_max")
+        return {
+            "date": times[day_offset],
+            "wave_height_m": round(float(wave), 2),
+            "wave_period_s": round(float(_at(md.get("wave_period_max"), day_offset) or 0.0), 1) or None,
+            "swell_height_m": _at(md.get("swell_wave_height_max"), day_offset),
+            "wind_speed_knots": round(float(_at(wd.get("wind_speed_10m_max"), day_offset) or 0.0), 1) or None,
+            "gust_knots": round(float(_at(wd.get("wind_gusts_10m_max"), day_offset) or 0.0), 1) or None,
+            "source": "open-meteo",
+            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+
 _client = OpenMeteoMarine()
 
 
 def live_sea_state(lat: float, lon: float) -> dict:
     """Module-level helper; raises :class:`LiveDataError` on any failure."""
     return _client.get_sea_state(lat, lon)
+
+
+def daily_forecast(lat: float, lon: float, day_offset: int = 1) -> dict:
+    """Module-level helper; raises :class:`LiveDataError` on any failure."""
+    return _client.get_daily_forecast(lat, lon, day_offset)
