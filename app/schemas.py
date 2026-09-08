@@ -56,6 +56,30 @@ class UserQueryRequest(BaseModel):
         return data
 
 
+class SimpleQueryRequest(BaseModel):
+    """Demo-friendly payload for ``POST /query``.
+
+    Accepts the shape used by the dashboard / demo tooling and adapts it to the
+    canonical :class:`UserQueryRequest`.  Vessel context defaults to Rameswaram
+    so a bare ``{"query": "..."}`` still works during a live demo.
+    """
+
+    query: str
+    role: str = "fisherman"
+    vessel_lat: float = 9.9252
+    vessel_lon: float = 79.3129
+    vessel_draft: Optional[float] = 2.5
+
+    def to_user_query(self) -> "UserQueryRequest":
+        return UserQueryRequest(
+            query=self.query,
+            user_role=ROLE_ALIASES.get(self.role.strip().lower(), "fisherman"),
+            lat=self.vessel_lat,
+            lon=self.vessel_lon,
+            draft=self.vessel_draft,
+        )
+
+
 class BearingVector(BaseModel):
     """Compass navigation vector between two geographic points."""
 

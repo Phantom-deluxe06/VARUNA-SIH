@@ -12,6 +12,8 @@ app/db/varuna.db-shm
 node_modules/
 .next/
 out/
+.env*.local
+frontend/.env*.local
 
 # --- VARUNA generated ML / satellite artefacts -------------------------------
 app/data/satellite/*.nc

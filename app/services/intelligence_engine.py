@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import os
 import re
 from datetime import datetime, timezone
 
@@ -27,6 +28,11 @@ from app.db.models import AuditLogEntry
 from app.schemas import AgentDecisionResponse, UserQueryRequest
 
 logger = logging.getLogger("varuna.intelligence")
+
+# Demo safety net: when True, a raising domain agent falls back to a canned
+# bilingual advisory (app.demo_mode) instead of surfacing a 500 during a live
+# demo. The happy path is untouched. Override with env VARUNA_DEMO_MODE=false.
+DEMO_MODE = os.getenv("VARUNA_DEMO_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # Layer 1 — deterministic regex entities.
@@ -183,7 +189,15 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
         layer = "L3"
 
     handler = AGENT_REGISTRY[intent]
-    decision = handler(req, entities)
+    try:
+        decision = handler(req, entities)
+    except Exception:
+        logger.exception("Agent handler '%s' failed", intent)
+        if not DEMO_MODE:
+            raise
+        from app.demo_mode import classify_demo_kind, demo_decision
+
+        decision = demo_decision(classify_demo_kind(query))
 
     nlu_trace = [
         f"NLU Layer-{layer} routing: intent='{intent}'",
