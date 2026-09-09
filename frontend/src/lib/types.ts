@@ -83,7 +83,9 @@ export type VesselStatus = {
 
 /** True when a data source string denotes genuine live external data. */
 export function isLiveSource(source?: string): boolean {
-  return !!source && source.startsWith("open-meteo");
+  if (!source) return false;
+  const s = source.toLowerCase();
+  return s.includes("open-meteo") || s.includes("open_meteo") || s.includes("live");
 }
 
 export type PfzZone = {

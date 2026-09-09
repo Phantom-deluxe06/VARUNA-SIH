@@ -74,7 +74,14 @@ export async function postQuery(args: {
     });
     clearTimeout(t);
     if (!res.ok) throw new Error(`/query -> ${res.status}`);
-    return (await res.json()) as AgentDecision;
+    const data = await res.json();
+    const rawStatus = (data.status || data.alert_level || "SAFE").toString().toUpperCase();
+    const normalizedStatus =
+      rawStatus === "CRITICAL" ? "CRITICAL" : rawStatus === "CAUTION" ? "CAUTION" : "SAFE";
+    return {
+      ...data,
+      status: normalizedStatus,
+    } as AgentDecision;
   } catch (err) {
     console.warn("[VARUNA api] /query failed", err);
     return {
