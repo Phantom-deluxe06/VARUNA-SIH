@@ -217,8 +217,8 @@ def whatsapp_health() -> str:
 
 @app.post("/whatsapp")
 @app.post("/whatsapp/webhook")
-@limiter.limit("60/minute")
 async def whatsapp_webhook(request: Request):
+    # No authentication / no X-Twilio-Signature validation: accept all POST requests.
     form = await request.form()
     body = str(form.get("Body", "") or "")
     sender = str(form.get("From", "default") or "default")
@@ -257,7 +257,11 @@ async def whatsapp_webhook(request: Request):
 
             resp = MessagingResponse()
             resp.message(reply)
-            return Response(content=str(resp), media_type="application/xml")
+            return Response(
+                content=str(resp),
+                media_type="application/xml",
+                headers={"Content-Type": "application/xml"},
+            )
 
     reply = handle_message(body, phone=sender, lat=lat, lon=lon)
 
@@ -266,6 +270,7 @@ async def whatsapp_webhook(request: Request):
     return Response(
         content=str(resp),
         media_type="application/xml",
+        headers={"Content-Type": "application/xml"},
     )
 
 
