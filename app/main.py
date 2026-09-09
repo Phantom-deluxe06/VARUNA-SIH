@@ -33,10 +33,19 @@ _PFZ_CANDIDATES = [(9.28, 79.31), (9.50, 80.20), (9.20, 80.50)]
 _DEFAULT_VESSEL = (9.9252, 79.3129)
 
 
+from app.services.alert_scheduler import (
+    get_registered_count,
+    get_registered_fishermen,
+    start_scheduler,
+    stop_scheduler,
+)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise the embedded SQLite database on startup (idempotent)."""
+    """Initialise the embedded SQLite database and proactive alert scheduler on startup."""
     init_db()
+    start_scheduler()
     # Best-effort live satellite ingestion in a daemon thread so startup is
     # never blocked by the network; stale/absent rasters degrade gracefully
     # inside RasterEngine (synthetic last-resort).
@@ -53,6 +62,7 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_refresh_satellite_rasters, daemon=True, name="varuna-satellite-fetch").start()
     yield
+    stop_scheduler()
 
 
 app = FastAPI(
@@ -207,4 +217,16 @@ async def whatsapp_webhook(
         content=str(resp),
         media_type="application/xml",
     )
+
+
+@app.get("/registered-fishermen")
+def registered_fishermen_count() -> dict:
+    """Returns the count and details of registered fishermen for proactive alerts."""
+    count = get_registered_count(active_only=True)
+    return {
+        "count": count,
+        "registered_users": count,
+        "fishermen": get_registered_fishermen(active_only=True),
+    }
+
 

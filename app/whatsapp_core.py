@@ -117,7 +117,8 @@ WELCOME_TEXT = (
     "• *கடல் safe-ஆ இருக்கா* — கடல் பாதுகாப்பு / safety\n"
     "• *எல்லை எவ்வளவு தூரம்* — IMBL தூரம்\n"
     "• *அலை உயரம் என்ன* — அலை நிலை / wave height\n"
-    "• *நாளைக்கு போகலாமா* — நாளைய கணிப்பு / tomorrow\n\n"
+    "• *நாளைக்கு போகலாமா* — நாளைய கணிப்பு / tomorrow\n"
+    "• *அலர்ட் வேண்டும்* / *register* — காலை அலர்ட் பெற / morning alerts\n\n"
     "அல்லது நேரடியாக கேளுங்கள் / Or just ask a question."
 )
 
@@ -129,6 +130,8 @@ HELP_TEXT = (
     "*எல்லை எவ்வளவு தூரம்*  →  சர்வதேச கடல் எல்லை தூரம்\n"
     "*அலை உயரம் என்ன*  →  தற்போதைய அலை உயரம்\n"
     "*நாளைக்கு போகலாமா*  →  நாளைய கடல் கணிப்பு\n"
+    "*அலர்ட் வேண்டும்* / *register*  →  காலை 5:00 மணி அலர்ட் பதிவு\n"
+    "*unregister*  →  எச்சரிக்கை சேவையை நிறுத்த\n"
     "━━━━━━━━━━━━━━━━━━━\n"
     "தரவு: NOAA ERDDAP + Open-Meteo (நேரடி) · demo இல்லை."
 )
@@ -686,6 +689,42 @@ def handle_message(
         return WELCOME_TEXT
     if key in _HELP_CMDS:
         return HELP_TEXT
+
+    # ── Proactive Alerts Subscription Commands ──
+    from app.services.alert_scheduler import register_fisherman, unregister_fisherman
+
+    # Command: "அலர்ட் வேண்டும்" (Tamil alert registration)
+    if any(phrase in key for phrase in ["அலர்ட் வேண்டும்", "alert vendum", "alert venum", "காலை அலர்ட்"]):
+        register_fisherman(phone=phone, language="tamil")
+        return (
+            "✅ *வருணா காலை அலர்ட் பதிவு செய்யப்பட்டது!*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "தினமும் காலை 5:00 மணிக்கு நேரடி கடல் வானிலை, மீன்பிடி மண்டலம் (PFZ) மற்றும் எல்லை பாதுகாப்பு எச்சரிக்கைகள் உங்கள் வாட்ஸ்அப்பிற்கு தானாக அனுப்பப்படும்.\n\n"
+            "⚠️ கடுமையான வானிலை அல்லது புயல் அபாயம் ஏற்பட்டால் உடனடி அவசர எச்சரிக்கையும் அனுப்பப்படும்.\n\n"
+            "எச்சரிக்கைகளை நிறுத்த *unregister* என அனுப்பவும்."
+        )
+
+    # Command: "register" (Alert registration)
+    if key in ("register", "subscribe", "start alerts", "பதிவு", "join alerts"):
+        register_fisherman(phone=phone, language="english" if respond_english_only else "tamil")
+        return (
+            "✅ *VARUNA Proactive Alerts Registered!*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "You are now registered for daily morning maritime advisories at 5:00 AM IST and immediate critical weather alerts.\n\n"
+            "தினமும் காலை 5:00 மணிக்கு நேரடி கடல் அறிக்கை மற்றும் புயல் எச்சரிக்கை உங்களுக்கு அனுப்பப்படும்.\n\n"
+            "Send *unregister* anytime to unsubscribe."
+        )
+
+    # Command: "unregister" (Alert unsubscription)
+    if key in ("unregister", "stop", "unsubscribe", "cancel alerts", "பதிவு நீக்கு", "நிறுத்து"):
+        unregister_fisherman(phone=phone)
+        return (
+            "❌ *VARUNA Alerts Unsubscribed*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "நீங்கள் காலை எச்சரிக்கை சேவையிலிருந்து நீக்கப்பட்டுவிட்டீர்கள்.\n"
+            "You will no longer receive proactive morning and emergency alerts.\n\n"
+            "மீண்டும் பதிவு செய்ய *register* அல்லது *அலர்ட் வேண்டும்* என அனுப்பவும்."
+        )
 
     # 0) Contextual follow-ups ("அது எவ்வளவு தூரம்" / "how far is that" ...).
     if _is_context_query(text):
