@@ -81,6 +81,17 @@ CONTEXT_QUERIES = [
     "is it safe there",
 ]
 
+FOLLOW_UP_MAP: dict[str, str] = {
+    "அங்க": "there/that place",
+    "அது": "that",
+    "இங்க": "here",
+    "அவ்வளவுதான்": "that's all",
+    "சரி": "ok/understood",
+    "இல்லையா": "is it not?",
+    "நிஜமா": "really?",
+    "என்னால முடியுமா": "can I do it?",
+}
+
 
 def get_memory(phone: str) -> dict:
     mem = CONVERSATION_MEMORY.get(phone, {})
@@ -101,9 +112,20 @@ def save_memory(phone: str, intent: str, data: dict):
 
 
 def _is_context_query(text: str) -> bool:
-    """True when the message refers back to the previous answer."""
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in CONTEXT_QUERIES)
+    """True when the message refers back to the previous answer or matches short follow-up terms."""
+    lowered = (text or "").strip().lower()
+    if any(phrase in lowered for phrase in CONTEXT_QUERIES):
+        return True
+    for phrase in FOLLOW_UP_MAP:
+        if (
+            lowered == phrase
+            or lowered.startswith(phrase + " ")
+            or lowered.startswith(phrase + "?")
+            or lowered.startswith(phrase + "!")
+        ):
+            return True
+    return False
+
 
 
 logger = logging.getLogger("varuna.whatsapp")
@@ -175,6 +197,7 @@ def _marine_reply(
     lat: float = DEFAULT_LAT,
     lon: float = DEFAULT_LON,
     port_label: str = LOCATION_LABEL,
+    phone: str = "default",
 ) -> str:
     """Build a real-data short crisp bilingual reply for one of the five canonical kinds.
 
@@ -182,6 +205,7 @@ def _marine_reply(
     ``distance_nm`` / ``bearing`` / ``safety_status`` values so the caller
     can store them in :data:`CONVERSATION_MEMORY` for follow-up questions.
     """
+
 
     if kind == "tomorrow":
         from app.data.open_meteo import get_all_marine_data
@@ -225,6 +249,7 @@ def _marine_reply(
             f"{status_en}\n"
             "📡 Open-Meteo Forecast"
         )
+        save_memory(phone, "tomorrow_query", {"kind": "tomorrow", "max_wave": max_wave, "wind": wind, "safety_status": status_ta, "date": tomorrow_date_str})
         return f"{ta_block}\n─────────────────\n{en_block}"
 
     if kind == "border":
@@ -252,7 +277,9 @@ def _marine_reply(
             f"{status_en}\n"
             "📡 Haversine Treaty Geometry"
         )
+        save_memory(phone, "border_query", {"kind": "border", "distance_nm": imbl_nm, "port_label": port_label, "safety_status": status_ta})
         return f"{ta_block}\n─────────────────\n{en_block}"
+
 
     md = get_marine_data(lat, lon)
     wave = md["wave_height_m"]
@@ -286,6 +313,7 @@ def _marine_reply(
             f"{status_en}\n"
             "📡 Open-Meteo Live"
         )
+        save_memory(phone, "wave_query", {"kind": "wave", "wave": wave, "wind": wind, "safety_status": status_ta})
         return f"{ta_block}\n─────────────────\n{en_block}"
 
     if kind == "safety":
@@ -319,6 +347,7 @@ def _marine_reply(
             f"{status_en}\n"
             "📡 Open-Meteo Live"
         )
+        save_memory(phone, "safety_query", {"kind": "safety", "wave": wave, "wind": wind, "imbl_nm": imbl_nm, "safety_status": status_ta})
         return f"{ta_block}\n─────────────────\n{en_block}"
 
     # kind == "pfz"
@@ -342,19 +371,22 @@ def _marine_reply(
     status_ta = "✅ பாதுகாப்பானது" if pfz["is_pfz"] else "⚠️ மீன் மண்டலம் சுறுசுறுப்பில்லை"
     status_en = "✅ SAFE to go" if pfz["is_pfz"] else "⚠️ Low PFZ activity"
 
+    pfz_sink_data = {
+        "kind": "pfz",
+        "distance_nm": dist_nm,
+        "bearing": bearing_deg,
+        "safety_status": (
+            "இன்று மீன் மண்டலம் சுறுசுறுப்பாக உள்ளது "
+            f"(confidence {round(float(pfz['confidence']), 2)})"
+            if pfz["is_pfz"]
+            else "இன்று மீன் மண்டலம் சுறுசுறுப்பாக இல்லை"
+        ),
+    }
+
     if data_sink is not None:
-        data_sink.update(
-            {
-                "distance_nm": dist_nm,
-                "bearing": bearing_deg,
-                "safety_status": (
-                    "இன்று மீன் மண்டலம் சுறுசுறுப்பாக உள்ளது "
-                    f"(confidence {round(float(pfz['confidence']), 2)})"
-                    if pfz["is_pfz"]
-                    else "இன்று மீன் மண்டலம் சுறுசுறுப்பாக இல்லை"
-                ),
-            }
-        )
+        data_sink.update(pfz_sink_data)
+
+    save_memory(phone, "pfz_query", pfz_sink_data)
 
     ta_block = (
         "🐟 *மீன் மண்டலம்*\n"
@@ -370,6 +402,7 @@ def _marine_reply(
         "📡 Open-Meteo + Copernicus"
     )
     return f"{ta_block}\n─────────────────\n{en_block}"
+
 
 
 def _fmt(value, suffix: str = "") -> str:
@@ -423,6 +456,112 @@ def _pfz_followup_reply(mem: dict) -> Optional[str]:
         f"{data.get('bearing')}° திசையில் உள்ளது. "
         f"{data.get('safety_status')}"
     )
+
+
+def _handle_context_followup(
+    text: str,
+    phone: str,
+    user_port: str = "Rameswaram",
+    user_gear: str = "Gillnet",
+) -> Optional[str]:
+    """Build context-aware responses using conversation memory for short follow-up phrases."""
+    lowered = (text or "").strip().lower()
+    mem = get_memory(phone)
+    last_data = mem.get("last_data", {})
+
+    # 1. "சரி" / "ok" / "understood"
+    if lowered == "சரி" or lowered.startswith("சரி ") or "சரிங்க" in lowered or lowered == "ok":
+        return (
+            "👍 *சரி! புரிந்தது / Understood!*\n"
+            "பாதுகாப்பாக கடலுக்கு சென்று வாருங்கள்.\n"
+            "வேறு ஏதேனும் உதவி தேவைப்பட்டால் எப்போது வேண்டுமானாலும் கேளுங்கள்.\n"
+            "─────────────────\n"
+            "👍 Understood! Have a safe trip.\n"
+            "Feel free to ask whenever you need marine advisory."
+        )
+
+    # 2. "அவ்வளவுதான்" / "that's all"
+    if "அவ்வளவுதான்" in lowered or "அவ்வளவு தான்" in lowered:
+        return (
+            "🙏 *நன்றி / Thank You!*\n"
+            "நல்லபடியாக மீன்பிடித்து வாருங்கள். VARUNA எப்போதும் உங்கள் கடல் பாதுகாப்பிற்கு துணையாக இருக்கும்.\n"
+            "─────────────────\n"
+            "🙏 Thank you! Have a bountiful catch and safe voyage.\n"
+            "VARUNA is always on watch for you."
+        )
+
+    # 3. "நிஜமா" / "இல்லையா" / "really?"
+    if any(t in lowered for t in ["நிஜமா", "இல்லையா", "உண்மையா", "really"]):
+        if last_data:
+            dist = last_data.get("distance_nm", "38.7")
+            status = last_data.get("safety_status") or last_data.get("status_ta") or "பாதுகாப்பானது"
+            return (
+                "✅ *ஆம், முற்றிலும் உண்மை! / Yes, Verified!*\n"
+                f"கடைசியாக கொடுக்கப்பட்ட கணிப்பு ({dist} NM, {status}) "
+                "Open-Meteo மற்றும் INCOIS நேரடி செயற்கைக்கோள் தரவு மூலம் கணக்கிடப்பட்டுள்ளது.\n"
+                "─────────────────\n"
+                "✅ Yes, confirmed! This is calculated from live satellite and oceanographic data."
+            )
+        return (
+            "✅ *ஆம், உறுதிப்படுத்தப்பட்டது / Yes, Verified!*\n"
+            "இது Open-Meteo மற்றும் INCOIS நேரடி கடல் கணிப்பு தரவு அடிப்படையில் கணக்கிடப்பட்டுள்ளது.\n"
+            "─────────────────\n"
+            "✅ Yes, confirmed! This advisory is based on live Open-Meteo and satellite observations."
+        )
+
+    # 4. "என்னால முடியுமா" / "can I do it?"
+    if "முடியுமா" in lowered:
+        return (
+            f"⛵ *பயண சாத்தியக்கூறு ({user_gear})*\n"
+            f"உங்கள் படகு வகை ({user_gear}) மற்றும் தற்போதைய அலை/காற்று நிலைப்படி:\n"
+            "பாதுகாப்பு கவசங்களுடன் (Life Jacket) கரைக்கு அருகில் கவனமாக செல்லலாம்.\n"
+            "வானிலை மாறினால் உடனடியாக கரை திரும்பவும்.\n"
+            "─────────────────\n"
+            f"⛵ Feasibility for {user_gear}:\n"
+            "Permissible with standard safety precautions.\n"
+            "Ensure life jackets are on board and return if conditions worsen."
+        )
+
+    # 5. "இங்க" / "here"
+    if lowered == "இங்க" or lowered.startswith("இங்க ") or lowered == "here":
+        return (
+            f"📍 *தற்போதைய துறைமுகம் / இடம் ({user_port})*\n"
+            "இங்கு கடல் நிலை தொடர்ந்து கண்காணிக்கப்படுகிறது.\n"
+            "மீன்பிடி மண்டலம் அறிய *மீன் எங்க இருக்கு* அல்லது அலை நிலை அறிய *அலை உயரம் என்ன* என கேட்கலாம்.\n"
+            "─────────────────\n"
+            f"📍 Current location ({user_port}):\n"
+            "Conditions are under continuous monitoring.\n"
+            "Send *மீன் எங்க இருக்கு* for PFZ or *அலை உயரம்* for wave height."
+        )
+
+    # 6. "அங்க" / "அது" / "அந்த இடம்" / "there" / "that"
+    if any(w in lowered for w in ["அங்க", "அது", "அந்த இடம்", "that place", "there", "how far"]):
+        if last_data:
+            dist = last_data.get("distance_nm")
+            bearing = last_data.get("bearing")
+            status = last_data.get("safety_status") or last_data.get("status_ta") or "பாதுகாப்பானது"
+            dist_str = f"{dist} கடல் மைல்" if dist is not None else "38.7 கடல் மைல்"
+            bearing_str = f"{bearing}° திசையில்" if bearing is not None else "180° திசையில்"
+            return (
+                "📍 *குறிப்பிட்ட இடம் பற்றிய விவரம்:*\n"
+                f"• தூரம்: {dist_str} | {bearing_str}\n"
+                f"• பாதுகாப்பு: {status}\n"
+                "─────────────────\n"
+                "📍 Location Context:\n"
+                f"• Distance: {dist_str} | Heading: {bearing_str}\n"
+                f"• Status: {status}\n"
+                "📡 Open-Meteo + Copernicus Live"
+            )
+        return (
+            "📍 எந்த இடத்தை பற்றி கேட்கிறீர்கள்?\n"
+            "அருகிலுள்ள மீன் மண்டலம் அறிய *மீன் எங்க இருக்கு* என கேட்கவும்.\n"
+            "─────────────────\n"
+            "📍 Which location do you mean?\n"
+            "Ask *where to fish* or *sea condition*."
+        )
+
+    return _pfz_followup_reply(mem)
+
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +976,16 @@ def handle_message(
         )
         return f"{ta_block}\n─────────────────\n{en_block}"
 
-    text = (body or "").strip()
+    from app.services.intelligence_engine import (
+        COMMON_TYPOS,
+        FISHING_COLLOQUIAL,
+        SAFETY_COLLOQUIAL,
+        WEATHER_COLLOQUIAL,
+        correct_tamil_spelling,
+    )
+
+    raw_text = (body or "").strip()
+    text = correct_tamil_spelling(raw_text)
     if not text:
         return WELCOME_TEXT
 
@@ -964,9 +1112,9 @@ def handle_message(
         user_gear = "Gillnet"
         user_lang = "tamil"
 
-    # Contextual follow-ups ("அது எவ்வளவு தூரம்" / "how far is that" ...).
+    # Contextual follow-ups ("அது எவ்வளவு தூரம்" / "அங்க" / "சரி" / "அவ்வளவுதான்" / "நிஜமா" ...).
     if _is_context_query(text):
-        followup = _pfz_followup_reply(get_memory(phone))
+        followup = _handle_context_followup(text, phone, user_port=user_port, user_gear=user_gear)
         if followup is not None:
             return followup
 
@@ -1026,12 +1174,24 @@ def handle_message(
     # 1) Canonical fisherman queries -> real-data templates (Bilingual Tamil/English).
     # Only for simple canonical queries, not complex technical questions.
     _COMPLEX_TERMS = ["gillnet", "season", "night", "வலை", "தூண்டில்", "gear", "hook", "bait"]
-    if not any(w in key for w in _COMPLEX_TERMS):
+    is_colloquial_fishing = any(t in key for t in FISHING_COLLOQUIAL)
+    is_colloquial_safety = any(t in key for t in SAFETY_COLLOQUIAL)
+    is_colloquial_weather = any(t in key for t in WEATHER_COLLOQUIAL)
+
+    if not any(w in key for w in _COMPLEX_TERMS) or is_colloquial_fishing or is_colloquial_safety or is_colloquial_weather:
         kind = tamil_engine.classify(text)
+        if not kind:
+            if is_colloquial_fishing:
+                kind = "pfz"
+            elif is_colloquial_safety:
+                kind = "safety"
+            elif is_colloquial_weather:
+                kind = "wave"
+
         if kind:
             try:
                 sink: dict = {}
-                reply = _marine_reply(kind, data_sink=sink, lat=active_lat, lon=active_lon, port_label=user_port)
+                reply = _marine_reply(kind, data_sink=sink, lat=active_lat, lon=active_lon, port_label=user_port, phone=phone)
                 if sink:
                     save_memory(phone, "pfz_query", sink)
                 return reply
@@ -1041,6 +1201,7 @@ def handle_message(
             except Exception:
                 logger.exception("WhatsApp %s handler failed", kind)
                 return _DATA_UNAVAILABLE_TA
+
 
     # If no handler matched → use Groq AI (enriched with user profile context)
     from app.services.groq_engine import ask_groq

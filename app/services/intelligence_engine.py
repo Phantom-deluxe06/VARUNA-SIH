@@ -48,12 +48,86 @@ PORT_ALIASES: dict[str, str] = {
     "tuicorin": "Thoothukudi Port",
 }
 
+FISHING_COLLOQUIAL: list[str] = [
+    # Rameswaram dialect
+    "மீனு", "மீனா", "மீனு கிடைக்குமா",
+    "பிடிக்கணும்", "கடலுக்கு போலாம்",
+    "மீன் வருமா", "ஏன் மீன் இல்ல",
+    # Kanyakumari dialect
+    "மச்சம்", "மச்சம் இருக்கா",
+    "கடல் எப்படி இருக்கு",
+    # General fishing terms
+    "வலை போட", "வலை வீச",
+    "நடு கடல்", "ஆழ கடல்",
+    "கரை", "துறைமுகம்",
+    "படகு", "தோணி", "வள்ளம்",
+    "மீன்பிடி", "மீன் வேட்டை",
+]
+
+SAFETY_COLLOQUIAL: list[str] = [
+    "போகலாமா", "போகலாமோ",
+    "ஆபத்தா", "பயமா இருக்கு",
+    "கடல் சுமாரா இருக்கா",
+    "நல்லா இருக்கா கடல்",
+    "ஓகே-வா கடல்",
+]
+
+WEATHER_COLLOQUIAL: list[str] = [
+    "மழை வருமா", "புயல் வருமா",
+    "காத்து அடிக்குமா",
+    "அலை அதிகமா இருக்கா",
+    "கரடு முரடா இருக்கா",
+]
+
+COMMON_TYPOS: dict[str, str] = {
+    "மீண்": "மீன்",
+    "கடற்": "கடல்",
+    "பதுகாப்பு": "பாதுகாப்பு",
+    "நளைக்கு": "நாளைக்கு",
+}
+
+
+def correct_tamil_spelling(text: str) -> str:
+    """Correct common Tamil typos in queries before intent detection."""
+    if not text:
+        return ""
+    corrected = text
+    for typo, fix in COMMON_TYPOS.items():
+        if typo in corrected:
+            corrected = corrected.replace(typo, fix)
+    return corrected
+
+
+TAMIL_NUMBERS: dict[str, int] = {
+    "ஒன்று": 1, "இரண்டு": 2,
+    "மூன்று": 3, "நான்கு": 4,
+    "ஐந்து": 5, "பத்து": 10,
+    "இருபது": 20, "முப்பது": 30,
+    "நாற்பது": 40, "ஐம்பது": 50,
+}
+
+TAMIL_DIRECTIONS: dict[str, int] = {
+    "வடக்கு": 0, "கிழக்கு": 90,
+    "தெற்கு": 180, "மேற்கு": 270,
+    "வடகிழக்கு": 45, "தென்கிழக்கு": 135,
+}
+
+TAMIL_TIME_WORDS: dict[str, str] = {
+    "காலை": "morning",
+    "மாலை": "evening",
+    "இரவு": "night",
+    "நாளை": "tomorrow",
+    "இன்று": "today",
+    "நேத்து": "yesterday",
+}
+
 FISHING_PATTERNS: list[str] = [
     "மீன்", "மண்டலம்", "pfz", "fish",
     "மீன்பிடி", "எங்க மீன்", "மீன் இருக்கு",
     "fishing zone", "where to fish",
     "மீன் எங்கே", "மீன் கிடைக்கும்",
     "catch fish", "மீன் பிடிக்க",
+    *FISHING_COLLOQUIAL,
 ]
 
 SAFETY_PATTERNS: list[str] = [
@@ -61,6 +135,7 @@ SAFETY_PATTERNS: list[str] = [
     "கடல் நிலை", "sea condition",
     "venture", "sail today", "go to sea",
     "kadal", "கடலுக்கு", "புறப்பட",
+    *SAFETY_COLLOQUIAL,
 ]
 
 BORDER_PATTERNS: list[str] = [
@@ -73,6 +148,7 @@ WEATHER_PATTERNS: list[str] = [
     "அலை", "wave", "wind", "காற்று",
     "புயல்", "storm", "cyclone", "rain",
     "மழை", "வானிலை", "weather", "forecast",
+    *WEATHER_COLLOQUIAL,
 ]
 
 TOMORROW_PATTERNS: list[str] = [
@@ -100,6 +176,7 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
 }
 
 
+
 # ---------------------------------------------------------------------------
 # Sub-intent detection — multi-intent queries need multiple agents.
 # ---------------------------------------------------------------------------
@@ -122,7 +199,7 @@ def detect_sub_intents(query: str) -> list[str]:
     ``MULTI_INTENT_TRIGGERS``, those intents are returned. Otherwise, all
     pattern-matched intents from ``INTENT_KEYWORDS`` are returned.
     """
-    q = (query or "").lower()
+    q = correct_tamil_spelling(query or "").lower()
     if not q:
         return ["situational"]
 
@@ -176,6 +253,29 @@ SYNONYM_LEXICON: list[tuple[str, str]] = [
     ("engine problem", "situational"),
     ("how is the sea", "situational"),
     ("sea safe", "situational"),
+    # Tamil colloquial synonyms
+    ("மச்சம்", "fishing"),
+    ("மச்சம் இருக்கா", "fishing"),
+    ("மீனு", "fishing"),
+    ("மீனா", "fishing"),
+    ("மீனு கிடைக்குமா", "fishing"),
+    ("மீன் வருமா", "fishing"),
+    ("கடலுக்கு போலாம்", "fishing"),
+    ("வலை போட", "fishing"),
+    ("வலை வீச", "fishing"),
+    ("தோணி", "fishing"),
+    ("வள்ளம்", "fishing"),
+    ("மீன் வேட்டை", "fishing"),
+    ("கடல் சுமாரா இருக்கா", "situational"),
+    ("நல்லா இருக்கா கடல்", "situational"),
+    ("ஓகே-வா கடல்", "situational"),
+    ("பயமா இருக்கு", "situational"),
+    ("ஆபத்தா", "situational"),
+    ("காத்து அடிக்குமா", "situational"),
+    ("அலை அதிகமா இருக்கா", "situational"),
+    ("கரடு முரடா இருக்கா", "situational"),
+    ("மழை வருமா", "situational"),
+    ("புயல் வருமா", "situational"),
 ]
 
 INTENT_EXAMPLES: dict[str, list[str]] = {
@@ -199,6 +299,9 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "is there a fishing hotspot nearby",
         "find pfz for tuna",
         "good fishing spot now",
+        "மீனு கிடைக்குமா",
+        "மச்சம் இருக்கா",
+        "வலை போட நல்லா இருக்கா",
     ],
     "situational": [
         "how is the weather at sea",
@@ -206,6 +309,9 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "is it safe out here",
         "engine issue what do i do",
         "give me an advisory for today",
+        "கடல் சுமாரா இருக்கா",
+        "அலை அதிகமா இருக்கா",
+        "காத்து அடிக்குமா",
     ],
 }
 
@@ -213,7 +319,7 @@ FUZZY_THRESHOLD = 0.65
 
 
 def _extract_layer1_entities(query: str) -> dict:
-    """Pull typed entities (draft metres, target port) from the query text."""
+    """Pull typed entities (draft metres, target port, Tamil numbers, directions, time words) from the query text."""
     entities: dict = {}
     m = DRAFT_RE.search(query)
     if m:
@@ -223,6 +329,30 @@ def _extract_layer1_entities(query: str) -> dict:
         if alias in lowered:
             entities["port"] = port_name
             break
+
+    # Tamil Numbers extraction
+    found_numbers = {}
+    for word, val in TAMIL_NUMBERS.items():
+        if word in query:
+            found_numbers[word] = val
+    if found_numbers:
+        entities["tamil_numbers"] = found_numbers
+        entities["extracted_numbers"] = list(found_numbers.values())
+
+    # Tamil Directions extraction
+    for d_word, deg in TAMIL_DIRECTIONS.items():
+        if d_word in query:
+            entities["direction_tamil"] = d_word
+            entities["direction_degrees"] = deg
+            break
+
+    # Tamil Time Words extraction
+    for t_word, en_val in TAMIL_TIME_WORDS.items():
+        if t_word in query:
+            entities["time_word_tamil"] = t_word
+            entities["time_context"] = en_val
+            break
+
     return entities
 
 
@@ -280,7 +410,8 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
     The response is always an ``AgentDecisionResponse``; every query is
     persisted to the embedded ``query_audit_log`` before returning.
     """
-    query = (req.query or "").strip()
+    raw_query = (req.query or "").strip()
+    query = correct_tamil_spelling(raw_query)
     entities = _extract_layer1_entities(query)
 
     intent = None
@@ -296,6 +427,7 @@ def route_query(req: UserQueryRequest) -> AgentDecisionResponse:
             intent = _layer2_intent(query)
             if intent is not None:
                 layer = "L2"
+
 
     if intent is None:
         # Unknown → Groq AI fallback
