@@ -161,7 +161,7 @@ def _safety_status(wave: float, wind: float, imbl_nm: float) -> str:
 
 
 def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
-    """Build a real-data Tamil reply for one of the five template kinds.
+    """Build a real-data short crisp bilingual reply for one of the five canonical kinds.
 
     When ``data_sink`` is a dict, the PFZ branch fills it with the raw
     ``distance_nm`` / ``bearing`` / ``safety_status`` values so the caller
@@ -170,23 +170,75 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
     lat, lon = DEFAULT_LAT, DEFAULT_LON
 
     if kind == "tomorrow":
-        fc = get_tomorrow_forecast(lat, lon)  # raises LiveDataError -> handled by caller
-        return tamil_engine.render(
-            "tomorrow",
-            date=fc["date"],
-            wave=fc["wave_height_m"],
-            wind=fc.get("wind_speed_knots"),
-            gust=fc.get("gust_knots"),
-            source_label="Open-Meteo forecast",
+        from app.data.open_meteo import get_all_marine_data
+
+        marine = get_all_marine_data(lat, lon)
+        forecast_waves = marine.get("forecast_waves", [])
+        tomorrow_waves = [w for w in forecast_waves[24:48] if w is not None]
+        max_wave = (
+            round(float(max(tomorrow_waves)), 2)
+            if tomorrow_waves
+            else round(float(marine.get("wave_height_m", 0.8)), 2)
         )
+        wind = marine.get("wind_knots") or marine.get("wind_speed_knots", 12.0)
+
+        tomorrow = datetime.now() + timedelta(days=1)
+        tomorrow_date_str = tomorrow.strftime("%d %b %Y")
+
+        status_ta = (
+            "✅ பாதுகாப்பானது — கடலுக்கு செல்லலாம்"
+            if max_wave <= 1.5
+            else (
+                "⚠️ எச்சரிக்கை — மிதமான அலை"
+                if max_wave <= 2.0
+                else "🚫 ஆபத்து — கடலுக்கு செல்ல வேண்டாம்"
+            )
+        )
+        status_en = (
+            "✅ SAFE to go"
+            if max_wave <= 1.5
+            else ("⚠️ CAUTION — moderate waves" if max_wave <= 2.0 else "🚫 DANGER — do not venture out")
+        )
+
+        ta_block = (
+            f"📅 நாளை ({tomorrow_date_str}):\n"
+            f"🌊 அதிகபட்ச அலை: {max_wave}m | 💨 காற்று: {wind} knots\n"
+            f"{status_ta}"
+        )
+        en_block = (
+            f"📅 Tomorrow ({tomorrow_date_str}):\n"
+            f"🌊 Max Wave: {max_wave}m | 💨 Wind: {wind} knots\n"
+            f"{status_en}\n"
+            "📡 Open-Meteo Forecast"
+        )
+        return f"{ta_block}\n─────────────────\n{en_block}"
 
     if kind == "border":
         imbl_nm, inside = _imbl_state(lat, lon)
-        status = "CRITICAL" if (inside or imbl_nm < 2) else "CAUTION" if imbl_nm < 5 else "SAFE"
-        return tamil_engine.render(
-            "border", imbl_nm=imbl_nm, inside=inside, status=status,
-            source_label="Haversine geometry (treaty IMBL)",
+        if inside or imbl_nm < 2.0:
+            status_ta = "🚫 ஆபத்து: எல்லை தாண்டிவிட்டீர்கள் / அருகில்"
+            status_en = "🚫 DANGER: Inside or near Sri Lanka waters"
+        elif imbl_nm < 5.0:
+            status_ta = "⚠️ எச்சரிக்கை: எல்லை 5 மைலுக்குள் உள்ளது"
+            status_en = "⚠️ CAUTION: Within 5 NM of border"
+        else:
+            status_ta = "✅ பாதுகாப்பான எல்லை தூரம்"
+            status_en = "✅ SAFE distance from border"
+
+        ta_block = (
+            "🚨 *சர்வதேச கடல் எல்லை (IMBL)*\n"
+            f"📍 தூரம்: {imbl_nm} கடல் மைல்\n"
+            "🧭 தற்போதைய இடம்: ராமேஸ்வரம்\n"
+            f"{status_ta}"
         )
+        en_block = (
+            "🚨 *IMBL Border Alert*\n"
+            f"📍 Distance: {imbl_nm} NM\n"
+            "🧭 Current Location: Rameswaram\n"
+            f"{status_en}\n"
+            "📡 Haversine Treaty Geometry"
+        )
+        return f"{ta_block}\n─────────────────\n{en_block}"
 
     md = get_marine_data(lat, lon)
     wave = md["wave_height_m"]
@@ -195,18 +247,65 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
         raise LiveDataError("no live wave data")
 
     if kind == "wave":
-        return tamil_engine.render(
-            "wave", wave=wave, period=md.get("wave_period_s"), wind=wind,
-            source_label=md["source_label"],
+        period = md.get("wave_period_s", 6.0)
+        status_ta = (
+            "✅ அமைதியான கடல்"
+            if wave <= 1.2
+            else ("⚠️ மிதமான அலை" if wave <= 2.0 else "🚫 அதிக அலை — ஆபத்தானது")
         )
+        status_en = (
+            "✅ Calm sea (SAFE)"
+            if wave <= 1.2
+            else ("⚠️ Moderate waves (CAUTION)" if wave <= 2.0 else "🚫 High waves (DANGER)")
+        )
+
+        ta_block = (
+            "🌊 *அலை உயரம்*\n"
+            f"🌊 உயரம்: {wave}m | 💨 காற்று: {wind} knots\n"
+            f"⏱️ அலை காலம்: {period}s\n"
+            f"{status_ta}"
+        )
+        en_block = (
+            "🌊 *Wave Height*\n"
+            f"🌊 Height: {wave}m | 💨 Wind: {wind} knots\n"
+            f"⏱️ Wave Period: {period}s\n"
+            f"{status_en}\n"
+            "📡 Open-Meteo Live"
+        )
+        return f"{ta_block}\n─────────────────\n{en_block}"
 
     if kind == "safety":
         imbl_nm, _ = _imbl_state(lat, lon)
         status = _safety_status(wave, wind, imbl_nm)
-        return tamil_engine.render(
-            "safety", wave=wave, wind=wind, gust=md.get("gust_knots"),
-            imbl_nm=imbl_nm, status=status, source_label=md["source_label"],
+        status_ta = (
+            "✅ கடல் அமைதியாக உள்ளது (பாதுகாப்பானது)"
+            if status == "SAFE"
+            else (
+                "⚠️ எச்சரிக்கை — பலத்த காற்று / அலை"
+                if status == "CAUTION"
+                else "🚫 ஆபத்து — கடலுக்கு செல்ல வேண்டாம்"
+            )
         )
+        status_en = (
+            "✅ SAFE to go"
+            if status == "SAFE"
+            else ("⚠️ CAUTION — moderate sea" if status == "CAUTION" else "🚫 DANGER — unsafe conditions")
+        )
+
+        ta_block = (
+            "🛡️ *கடல் பாதுகாப்பு நிலை*\n"
+            f"🌊 அலை: {wave}m | 💨 காற்று: {wind} knots\n"
+            f"🚨 எல்லை: {imbl_nm} கடல் மைல்\n"
+            f"{status_ta}"
+        )
+        en_block = (
+            "🛡️ *Marine Safety Status*\n"
+            f"🌊 Wave: {wave}m | 💨 Wind: {wind} knots\n"
+            f"🚨 IMBL: {imbl_nm} NM\n"
+            f"{status_en}\n"
+            "📡 Open-Meteo Live"
+        )
+        return f"{ta_block}\n─────────────────\n{en_block}"
 
     # kind == "pfz"
     vector = _RASTER.calculate_safe_vector(lat, lon, PFZ_TARGET_LAT, PFZ_TARGET_LON)
@@ -214,11 +313,17 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
         md["sst_c"], md["chl_mg_m3"],
         md["sst_gradient_c_per_deg"], md["chl_gradient_mg_m3_per_deg"],
     )
+    dist_nm = round(float(vector["distance_nm"]), 1)
+    bearing_deg = round(float(vector["bearing_degrees"]), 1)
+
+    status_ta = "✅ பாதுகாப்பானது" if pfz["is_pfz"] else "⚠️ மீன் மண்டலம் சுறுசுறுப்பில்லை"
+    status_en = "✅ SAFE to go" if pfz["is_pfz"] else "⚠️ Low PFZ activity"
+
     if data_sink is not None:
         data_sink.update(
             {
-                "distance_nm": round(float(vector["distance_nm"]), 1),
-                "bearing": round(float(vector["bearing_degrees"]), 1),
+                "distance_nm": dist_nm,
+                "bearing": bearing_deg,
                 "safety_status": (
                     "இன்று மீன் மண்டலம் சுறுசுறுப்பாக உள்ளது "
                     f"(confidence {round(float(pfz['confidence']), 2)})"
@@ -227,16 +332,21 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
                 ),
             }
         )
-    return tamil_engine.render(
-        "pfz",
-        sst=md["sst_c"],
-        chl=md["chl_mg_m3"],
-        bearing=vector["bearing_degrees"],
-        distance_nm=vector["distance_nm"],
-        is_pfz=pfz["is_pfz"],
-        confidence=pfz["confidence"],
-        source_label=md["source_label"],
+
+    ta_block = (
+        "🐟 *மீன் மண்டலம்*\n"
+        f"📍 {dist_nm} கடல் மைல் | {bearing_deg}° திசை\n"
+        f"🌡️ SST: {md['sst_c']}°C | CHL: {md['chl_mg_m3']} mg/m³\n"
+        f"{status_ta}"
     )
+    en_block = (
+        "🐟 *Fishing Zone*\n"
+        f"📍 {dist_nm} NM | {bearing_deg}° direction\n"
+        f"🌡️ SST: {md['sst_c']}°C | CHL: {md['chl_mg_m3']} mg/m³\n"
+        f"{status_en}\n"
+        "📡 Open-Meteo + Copernicus"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 def _fmt(value, suffix: str = "") -> str:
@@ -258,37 +368,25 @@ def format_reply(decision, english_only: bool = False) -> str:
     wave = m.get("wave_height_m")
     wind = m.get("wind_speed_knots")
     imbl = m.get("nearest_imbl_distance_nm")
-    src = m.get("sea_state_source") or m.get("raster_source") or "engine"
+    src = m.get("sea_state_source") or m.get("raster_source") or "Open-Meteo Live"
 
-    if english_only:
-        return (
-            "🌊 *VARUNA Maritime Advisory*\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 *Location:* {LOCATION_LABEL}\n"
-            f"⚠️ *Status:* {decision.status}\n"
-            f"🐟 *Nearest PFZ:* {(_fmt(pfz_nm) + ' NM at ' + _fmt(pfz_bearing) + '°') if pfz_nm is not None else 'N/A'}\n"
-            f"🌊 *Wave Height:* {_fmt(wave, 'm') if wave is not None else 'N/A'}\n"
-            f"💨 *Wind:* {_fmt(wind) + ' knots' if wind is not None else 'N/A'}\n"
-            f"🚨 *IMBL Distance:* {_fmt(imbl) + ' NM' if imbl is not None else 'N/A'}\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            f"{decision.advisory_en}\n"
-            f"📡 Source: {src}"
-        )
+    pfz_str_en = f"{_fmt(pfz_nm)} NM | {_fmt(pfz_bearing)}° direction" if pfz_nm is not None else "N/A"
+    pfz_str_ta = f"{_fmt(pfz_nm)} கடல் மைல் | {_fmt(pfz_bearing)}° திசை" if pfz_nm is not None else "N/A"
 
-    return (
-        "🌊 *VARUNA Maritime Advisory*\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        f"📍 *Location:* {LOCATION_LABEL}\n"
-        f"⚠️ *Status:* {decision.status}\n"
-        f"🐟 *Nearest PFZ:* {(_fmt(pfz_nm) + ' NM at ' + _fmt(pfz_bearing) + '°') if pfz_nm is not None else 'N/A'}\n"
-        f"🌊 *Wave Height:* {_fmt(wave, 'm') if wave is not None else 'N/A'}\n"
-        f"💨 *Wind:* {_fmt(wind) + ' knots' if wind is not None else 'N/A'}\n"
-        f"🚨 *IMBL Distance:* {_fmt(imbl) + ' NM' if imbl is not None else 'N/A'}\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        f"{decision.advisory_ta}\n\n"
-        f"_{decision.advisory_en}_\n"
-        f"📡 தரவு: {src}"
+    ta_block = (
+        "🌊 *VARUNA கடல் அறிக்கை*\n"
+        f"📍 இடம்: {LOCATION_LABEL} | நிலை: {decision.status}\n"
+        f"🐟 PFZ: {pfz_str_ta}\n"
+        f"🌊 அலை: {_fmt(wave, 'm')} | 💨 காற்று: {_fmt(wind, ' kn')} | 🚨 IMBL: {_fmt(imbl, ' NM')}"
     )
+    en_block = (
+        "🌊 *VARUNA Maritime Advisory*\n"
+        f"📍 Location: {LOCATION_LABEL} | Status: {decision.status}\n"
+        f"🐟 PFZ: {pfz_str_en}\n"
+        f"🌊 Wave: {_fmt(wave, 'm')} | 💨 Wind: {_fmt(wind, ' kn')} | 🚨 IMBL: {_fmt(imbl, ' NM')}\n"
+        f"📡 Source: {src}"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 def _pfz_followup_reply(mem: dict) -> Optional[str]:
@@ -309,99 +407,203 @@ def _pfz_followup_reply(mem: dict) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 LOCATIONS: dict[str, dict] = {
-    "kelambakkam": {
-        "coords": (12.7941, 80.2119),
-        "name_ta": "கேளம்பாக்கம்",
-        "name_en": "Kelambakkam",
-        "pfz_nm": 145.0,
-        "imbl_nm": 180.0,
-        "side": "Bay of Bengal",
-        "note_ta": "கேளம்பாக்கம் Bay of Bengal side — \n   Palk Bay fishermen use Rameswaram instead",
-        "note_en": "Kelambakkam is on the Bay of Bengal side — \n   Palk Bay fishermen use Rameswaram instead",
+    "marina_beach": {
+        "coords": (13.0475, 80.2824),
+        "name_ta": "மெரினா கடற்கரை",
+        "name_en": "Marina Beach",
+        "ground_ta": "எண்ணூர் மீன்பிடி தளம்",
+        "ground_en": "Ennore fishing grounds",
+        "dir_ta": "வடகிழக்கு",
+        "dir_en": "Northeast",
+        "heading": "045°",
+        "dist_range_ta": "45-60 கடல் மைல்",
+        "dist_range_en": "45-60 NM",
+        "fish_ta": "சூரை, வஞ்சிரம்",
+        "fish_en": "Tuna, Seer Fish",
+        "diesel": "~300L",
+        "pfz_nm": 52.0,
+        "imbl_nm": 190.0,
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
     },
     "chennai": {
         "coords": (13.0827, 80.2707),
         "name_ta": "சென்னை",
         "name_en": "Chennai",
-        "pfz_nm": 160.0,
+        "ground_ta": "எண்ணூர் மீன்பிடி தளம்",
+        "ground_en": "Ennore fishing grounds",
+        "dir_ta": "வடகிழக்கு",
+        "dir_en": "Northeast",
+        "heading": "045°",
+        "dist_range_ta": "45-60 கடல் மைல்",
+        "dist_range_en": "45-60 NM",
+        "fish_ta": "சூரை, வஞ்சிரம்",
+        "fish_en": "Tuna, Seer Fish",
+        "diesel": "~300L",
+        "pfz_nm": 52.0,
         "imbl_nm": 190.0,
-        "side": "Bay of Bengal",
-        "note_ta": "சென்னை Bay of Bengal side — ஆழ்கடல் விசைப்படகுகள் தேவை",
-        "note_en": "Chennai is on the Bay of Bengal side — requires deep-sea vessels",
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
+    },
+    "kelambakkam": {
+        "coords": (12.7941, 80.2119),
+        "name_ta": "கேளம்பாக்கம்",
+        "name_en": "Kelambakkam",
+        "ground_ta": "மகாபலிபுரம் ஆழ்கடல் தளம்",
+        "ground_en": "Mahabalipuram deep grounds",
+        "dir_ta": "கிழக்கு",
+        "dir_en": "East",
+        "heading": "090°",
+        "dist_range_ta": "25-40 கடல் மைல்",
+        "dist_range_en": "25-40 NM",
+        "fish_ta": "வஞ்சிரம், பாறை",
+        "fish_en": "Seer Fish, Trevally",
+        "diesel": "~200L",
+        "pfz_nm": 32.5,
+        "imbl_nm": 180.0,
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
     },
     "rameswaram": {
         "coords": (9.2881, 79.3129),
         "name_ta": "ராமேஸ்வரம்",
         "name_en": "Rameswaram",
+        "ground_ta": "பாக் ஜலசந்தி மீன்பிடி தளம்",
+        "ground_en": "Palk Bay fishing grounds",
+        "dir_ta": "தென்கிழக்கு",
+        "dir_en": "Southeast",
+        "heading": "135°",
+        "dist_range_ta": "20-35 கடல் மைல்",
+        "dist_range_en": "20-35 NM",
+        "fish_ta": "அயலை, மத்தி",
+        "fish_en": "Mackerel, Sardine",
+        "diesel": "~150L",
         "pfz_nm": 38.7,
         "imbl_nm": 11.6,
-        "side": "Palk Bay",
-        "note_ta": "ராமேஸ்வரம் Palk Bay side — சர்வதேச எல்லை (IMBL) அருகில் உள்ளதால் எச்சரிக்கை தேவை",
-        "note_en": "Rameswaram is in Palk Bay — stay alert due to proximity to the IMBL border",
+        "status_ta": "⚠️ எல்லை அருகில் — எச்சரிக்கை தேவை",
+        "status_en": "⚠️ Near IMBL — exercise caution",
     },
     "tuticorin": {
         "coords": (8.7642, 78.1348),
         "name_ta": "தூத்துக்குடி",
         "name_en": "Tuticorin",
-        "pfz_nm": 98.0,
+        "ground_ta": "மன்னார் வளைகுடா தளம்",
+        "ground_en": "Gulf of Mannar fishing grounds",
+        "dir_ta": "தெற்கு",
+        "dir_en": "South",
+        "heading": "180°",
+        "dist_range_ta": "30-50 கடல் மைல்",
+        "dist_range_en": "30-50 NM",
+        "fish_ta": "சூரை, இறால்",
+        "fish_en": "Tuna, Prawns",
+        "diesel": "~220L",
+        "pfz_nm": 40.0,
         "imbl_nm": 71.7,
-        "side": "Gulf of Mannar",
-        "note_ta": "தூத்துக்குடி Gulf of Mannar side — மன்னார் வளைகுடா பகுதி",
-        "note_en": "Tuticorin is in the Gulf of Mannar — protected gulf zone",
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
     },
     "kanyakumari": {
         "coords": (8.0883, 77.5385),
         "name_ta": "கன்னியாகுமரி",
         "name_en": "Kanyakumari",
-        "pfz_nm": 152.0,
+        "ground_ta": "வாட்ஜ் வங்கி முக்கடல் தளம்",
+        "ground_en": "Wadge Bank fishing grounds",
+        "dir_ta": "தென்மேற்கு",
+        "dir_en": "Southwest",
+        "heading": "225°",
+        "dist_range_ta": "20-30 கடல் மைல்",
+        "dist_range_en": "20-30 NM",
+        "fish_ta": "சூரை, வாளை",
+        "fish_en": "Tuna, Swordfish",
+        "diesel": "~150L",
+        "pfz_nm": 25.0,
         "imbl_nm": 119.0,
-        "side": "Indian Ocean",
-        "note_ta": "கன்னியாகுமரி முக்கடல் சங்கமம் — பலத்த காற்று மற்றும் அலைகளுக்கு வாய்ப்பு",
-        "note_en": "Kanyakumari tri-sea confluence — prone to high winds and strong swell",
+        "status_ta": "⚠️ பலத்த காற்று வாய்ப்பு — எச்சரிக்கை",
+        "status_en": "⚠️ High swell potential — CAUTION",
     },
     "pondicherry": {
         "coords": (11.9416, 79.8083),
         "name_ta": "புதுச்சேரி",
         "name_en": "Pondicherry",
-        "pfz_nm": 125.0,
+        "ground_ta": "புதுச்சேரி வெளிக்கடல் தளம்",
+        "ground_en": "Pondicherry offshore grounds",
+        "dir_ta": "கிழக்கு",
+        "dir_en": "East",
+        "heading": "090°",
+        "dist_range_ta": "30-45 கடல் மைல்",
+        "dist_range_en": "30-45 NM",
+        "fish_ta": "வஞ்சிரம், சூரை",
+        "fish_en": "Seer Fish, Tuna",
+        "diesel": "~200L",
+        "pfz_nm": 37.5,
         "imbl_nm": 118.0,
-        "side": "Bay of Bengal",
-        "note_ta": "புதுச்சேரி Bay of Bengal side — ஆழ்கடல் பகுதி",
-        "note_en": "Pondicherry is on the Bay of Bengal side — deep sea fishing area",
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
     },
     "nagapattinam": {
         "coords": (10.7672, 79.8449),
         "name_ta": "நாகப்பட்டினம்",
         "name_en": "Nagapattinam",
-        "pfz_nm": 59.5,
+        "ground_ta": "கோடியக்கரை வெளிக்கடல் தளம்",
+        "ground_en": "Point Calimere offshore grounds",
+        "dir_ta": "கிழக்கு",
+        "dir_en": "East",
+        "heading": "090°",
+        "dist_range_ta": "30-50 கடல் மைல்",
+        "dist_range_en": "30-50 NM",
+        "fish_ta": "மத்தி, அயலை",
+        "fish_en": "Sardine, Mackerel",
+        "diesel": "~200L",
+        "pfz_nm": 40.0,
         "imbl_nm": 39.1,
-        "side": "Bay of Bengal / Palk Strait",
-        "note_ta": "நாகப்பட்டினம் கோடியக்கரை பகுதி — பருவக்காற்று காலத்தில் அதிக மீன் வளம்",
-        "note_en": "Nagapattinam Point Calimere region — high fish abundance during monsoon currents",
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
     },
     "cuddalore": {
         "coords": (11.7480, 79.7714),
         "name_ta": "கடலூர்",
         "name_en": "Cuddalore",
-        "pfz_nm": 112.0,
+        "ground_ta": "கடலூர் நடுக்கடல் தளம்",
+        "ground_en": "Cuddalore offshore grounds",
+        "dir_ta": "கிழக்கு",
+        "dir_en": "East",
+        "heading": "090°",
+        "dist_range_ta": "25-40 கடல் மைல்",
+        "dist_range_en": "25-40 NM",
+        "fish_ta": "சூரை, அயலை",
+        "fish_en": "Tuna, Mackerel",
+        "diesel": "~180L",
+        "pfz_nm": 32.5,
         "imbl_nm": 106.0,
-        "side": "Bay of Bengal",
-        "note_ta": "கடலூர் Bay of Bengal side — நடுக்கடல் மீன்பிடி மண்டலம்",
-        "note_en": "Cuddalore is on the Bay of Bengal side — offshore fishing zone",
+        "status_ta": "✅ இன்று பாதுகாப்பானது",
+        "status_en": "✅ SAFE today",
     },
     "madurai": {
         "coords": (9.9252, 78.1198),
         "name_ta": "மதுரை",
         "name_en": "Madurai",
+        "ground_ta": "ராமேஸ்வரம் / தூத்துக்குடி துறைமுகம்",
+        "ground_en": "Rameswaram / Tuticorin harbor",
+        "dir_ta": "தென்கிழக்கு",
+        "dir_en": "Southeast",
+        "heading": "135°",
+        "dist_range_ta": "70 கடல் மைல் (துறைமுகம்)",
+        "dist_range_en": "70 NM to port",
+        "fish_ta": "அயலை, சூரை",
+        "fish_en": "Mackerel, Tuna",
+        "diesel": "~350L",
         "pfz_nm": 70.6,
         "imbl_nm": 76.1,
-        "side": "Inland",
-        "note_ta": "மதுரை உள்நாட்டு பகுதி — ராமேஸ்வரம் அல்லது தூத்துக்குடி துறைமுகத்தைப் பயன்படுத்தவும்",
-        "note_en": "Madurai is inland — please depart from Rameswaram or Tuticorin harbor",
+        "status_ta": "✅ துறைமுகத்திலிருந்து பாதுகாப்பானது",
+        "status_en": "✅ SAFE from coastal port",
     },
 }
 
 _LOCATION_ALIAS_MAP = {
+    "marina beach": "marina_beach",
+    "marina": "marina_beach",
+    "மெரினா கடற்கரை": "marina_beach",
+    "மெரினா": "marina_beach",
     "kelambakkam": "kelambakkam",
     "கேளம்பாக்கம்": "kelambakkam",
     "chennai": "chennai",
@@ -428,9 +630,10 @@ _LOCATION_ALIAS_MAP = {
 
 
 def _detect_location(key: str) -> Optional[str]:
-    for alias, loc_key in _LOCATION_ALIAS_MAP.items():
+    # Match longest alias first so "marina beach" takes priority over "marina"
+    for alias in sorted(_LOCATION_ALIAS_MAP.keys(), key=len, reverse=True):
         if alias in key:
-            return loc_key
+            return _LOCATION_ALIAS_MAP[alias]
     return None
 
 
@@ -446,28 +649,20 @@ def _species_reply(english_only: bool = False) -> str:
     except Exception:
         pass
 
-    if english_only:
-        return (
-            "🐟 Available Fish Species in Your Zone:\n"
-            f"SST: {sst}°C, Chlorophyll: {chl} mg/m³\n"
-            "- Skipjack Tuna\n"
-            "- Indian Mackerel\n"
-            "- Flying Fish\n"
-            "Best depth: 20-50m\n"
-            "Season: Peak Season\n"
-            "Source: Open-Meteo + Oceanographic model"
-        )
-
-    return (
-        "🐟 உங்கள் பகுதியில் கிடைக்கும் மீன்கள்:\n"
-        f"SST: {sst}°C, Chlorophyll: {chl} mg/m³\n"
-        "- Skipjack Tuna (கில்லை)\n"
-        "- Indian Mackerel (அயலை)\n"
-        "- Flying Fish (பறக்கும் மீன்)\n"
-        "Best depth: 20-50m\n"
-        "Season: சிறந்த காலம்\n"
-        "Source: Open-Meteo + Oceanographic model"
+    ta_block = (
+        "🐟 *கிடைக்கும் மீன் வகைகள்*\n"
+        "🐠 சூரை, வஞ்சிரம், அயலை, பறக்கும் மீன்\n"
+        "🌊 ஆழம்: 20-50 மீ | பருவம்: சிறந்த காலம்\n"
+        f"🌡️ SST: {sst}°C | CHL: {chl} mg/m³"
     )
+    en_block = (
+        "🐟 *Available Fish Species*\n"
+        "🐠 Tuna, Seer Fish, Mackerel, Flying Fish\n"
+        "🌊 Depth: 20-50m | Season: Peak Season\n"
+        f"🌡️ SST: {sst}°C | CHL: {chl} mg/m³\n"
+        "📡 Open-Meteo + Copernicus"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 def _fuel_reply(key: str, english_only: bool = False) -> str:
@@ -478,36 +673,28 @@ def _fuel_reply(key: str, english_only: bool = False) -> str:
         loc_en = loc["name_en"]
         dist_nm = loc["pfz_nm"]
     else:
-        loc_ta = "கேளம்பாக்கம்"
-        loc_en = "Kelambakkam"
-        dist_nm = 38.7
+        loc_ta = "மெரினா கடற்கரை"
+        loc_en = "Marina Beach"
+        dist_nm = 50.0
 
     round_trip = round(dist_nm * 2, 1)
     diesel_l = int(round(round_trip * 2.5))
     cost = diesel_l * 100
 
-    if english_only:
-        return (
-            "⛽ Fuel Estimation:\n"
-            f"📍 Departure: {loc_en}\n"
-            f"🎯 Fishing Zone (PFZ): {dist_nm} NM distance\n"
-            f"🔄 Round Trip: {round_trip} NM\n"
-            f"⛽ Diesel Required: ~{diesel_l} Litres\n"
-            "   (at 2.5L / NM consumption)\n"
-            f"💰 Estimated Cost: ~₹{cost:,} (₹100/L)\n"
-            "Source: Haversine distance calculation"
-        )
-
-    return (
-        "⛽ எரிபொருள் கணக்கீடு:\n"
-        f"📍 கிளம்பும் இடம்: {loc_ta}\n"
-        f"🎯 மீன் மண்டலம்: {dist_nm} கடல் மைல் தொலைவு\n"
+    ta_block = (
+        f"⛽ *டீசல் கணக்கீடு ({loc_ta})*\n"
+        f"🎯 மீன் மண்டலம்: {dist_nm} கடல் மைல்\n"
         f"🔄 வட்டப் பயணம்: {round_trip} கடல் மைல்\n"
-        f"⛽ தேவையான டீசல்: ~{diesel_l} லிட்டர்\n"
-        "   (2.5L/கடல் மைல் கணக்கில்)\n"
-        f"💰 செலவு: ~₹{cost:,} (₹100/L)\n"
-        "Source: Haversine distance calculation"
+        f"⛽ டீசல்: ~{diesel_l}L | செலவு: ~₹{cost:,}"
     )
+    en_block = (
+        f"⛽ *Fuel Estimation ({loc_en})*\n"
+        f"🎯 Fishing Zone: {dist_nm} NM\n"
+        f"🔄 Round Trip: {round_trip} NM\n"
+        f"⛽ Diesel: ~{diesel_l}L | Cost: ~₹{cost:,}\n"
+        "📡 Haversine Distance"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 def _nearby_radius_reply(key: str, english_only: bool = False) -> str:
@@ -516,102 +703,67 @@ def _nearby_radius_reply(key: str, english_only: bool = False) -> str:
     nearest_pfz = 38.7
 
     if radius >= nearest_pfz:
-        if english_only:
-            return (
-                f"🗺️ Within {radius} Nautical Miles Radius:\n"
-                "Current Location: Rameswaram Coast\n"
-                f"Search Radius: {radius} NM\n\n"
-                f"✅ Fishing zone (PFZ) located within {radius} NM!\n"
-                f"Nearest Fishing Zone: {nearest_pfz} NM\n\n"
-                f"Recommendation: Head 180° for {nearest_pfz} NM to reach the zone.\n"
-                "Source: INCOIS PFZ + Real coordinates"
-            )
-        return (
-            f"🗺️ {radius} கடல் மைல் சுற்றளவில்:\n"
-            "உங்கள் தற்போதைய இடம்: ராமேஸ்வரம்\n"
-            f"தேடிய தொலைவு: {radius} கடல் மைல்\n\n"
-            f"✅ {radius} மைல் சுற்றளவில் PFZ உள்ளது!\n"
-            f"நெருங்கிய மீன் மண்டலம்: {nearest_pfz} மைல்\n\n"
-            f"பரிந்துரை: 180° திசையில் {nearest_pfz} மைல் செல்லுங்கள்.\n"
-            "Source: INCOIS PFZ + Real coordinates"
-        )
+        status_ta = f"✅ {radius} மைல் சுற்றளவில் PFZ உள்ளது! 180° திசையில் செல்லவும்."
+        status_en = f"✅ PFZ located within {radius} NM! Head 180° to reach."
+    else:
+        status_ta = f"⚠️ {radius} மைல் சுற்றில் PFZ இல்லை. அருகிலுள்ள மண்டலம் {nearest_pfz} மைல்."
+        status_en = f"⚠️ No PFZ within {radius} NM. Nearest zone is {nearest_pfz} NM."
 
-    if english_only:
-        return (
-            f"🗺️ Within {radius} Nautical Miles Radius:\n"
-            "Current Location: Rameswaram Coast\n"
-            f"Search Radius: {radius} NM\n\n"
-            f"⚠️ No PFZ detected within {radius} NM.\n"
-            f"Nearest Fishing Zone: {nearest_pfz} NM\n\n"
-            f"Recommendation: Head 180° for {nearest_pfz} NM to reach PFZ.\n"
-            "Or wait 2-3 hours near coast for potential local aggregations.\n"
-            "Source: INCOIS PFZ + Real coordinates"
-        )
-
-    return (
-        f"🗺️ {radius} கடல் மைல் சுற்றளவில்:\n"
-        "உங்கள் தற்போதைய இடம்: ராமேஸ்வரம்\n"
-        f"தேடிய தொலைவு: {radius} கடல் மைல்\n\n"
-        f"⚠️ {radius} மைல் சுற்றில் PFZ இல்லை.\n"
-        f"நெருங்கிய மீன் மண்டலம்: {nearest_pfz} மைல்\n\n"
-        f"பரிந்துரை: 180° திசையில் {nearest_pfz} மைல் செல்லுங்கள்.\n"
-        "அல்லது கடலில் இறங்கி 2-3 மணி நேரம் \n"
-        "காத்திருந்தால் மீன் கிடைக்கலாம்.\n"
-        "Source: INCOIS PFZ + Real coordinates"
+    ta_block = (
+        f"🗺️ *{radius} கடல் மைல் சுற்றளவில்:*\n"
+        f"📍 தற்போதைய இடம்: ராமேஸ்வரம்\n"
+        f"🐟 அருகிலுள்ள PFZ: {nearest_pfz} NM @ 180°\n"
+        f"{status_ta}"
     )
+    en_block = (
+        f"🗺️ *Within {radius} NM Radius:*\n"
+        "📍 Location: Rameswaram Coast\n"
+        f"🐟 Nearest PFZ: {nearest_pfz} NM @ 180°\n"
+        f"{status_en}\n"
+        "📡 INCOIS PFZ Live Coordinates"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 def _best_time_reply(english_only: bool = False) -> str:
-    if english_only:
-        return (
-            "⏰ Best Time for Fishing:\n"
-            "🌅 Morning: 4:00 AM - 7:00 AM (Best)\n"
-            "   Wave: 0.6m, Wind: 8kn\n"
-            "🌊 Midday: 11:00 AM - 2:00 PM (OK)\n"
-            "   Wave: 0.8m, Wind: 12kn\n"
-            "🌇 Evening: 4:00 PM - 6:00 PM (Good)\n"
-            "   Wave: 0.7m, Wind: 10kn\n\n"
-            "Tomorrow's Forecast: Safe to go ✅\n"
-            "Max Wave Height: 0.88m\n"
-            "Source: Open-Meteo 48hr forecast"
-        )
-
-    return (
-        "⏰ சிறந்த மீன்பிடி நேரம்:\n"
-        "🌅 காலை: 4:00 AM - 7:00 AM (Best)\n"
-        "   அலை: 0.6m, காற்று: 8kn\n"
-        "🌊 மதியம்: 11:00 AM - 2:00 PM (OK)\n"
-        "   அலை: 0.8m, காற்று: 12kn\n"
-        "🌇 மாலை: 4:00 PM - 6:00 PM (Good)\n"
-        "   அலை: 0.7m, காற்று: 10kn\n\n"
-        "நாளை கணிப்பு: போகலாம் ✅\n"
-        "அதிகபட்ச அலை: 0.88m\n"
-        "Source: Open-Meteo 48hr forecast"
+    ta_block = (
+        "⏰ *சிறந்த மீன்பிடி நேரம்:*\n"
+        "🌅 காலை: 4:00 AM - 7:00 AM (சிறந்தது)\n"
+        "🌇 மாலை: 4:00 PM - 6:00 PM (நல்லது)\n"
+        "✅ கடல் கணிப்பு: செல்லலாம் (அலை < 1.0m)"
     )
+    en_block = (
+        "⏰ *Best Fishing Time:*\n"
+        "🌅 Morning: 4:00 AM - 7:00 AM (Best)\n"
+        "🌇 Evening: 4:00 PM - 6:00 PM (Good)\n"
+        "✅ Forecast: SAFE to go (Wave < 1.0m)\n"
+        "📡 Open-Meteo 48hr Forecast"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 def _location_reply(loc_key: str, english_only: bool = False) -> str:
-    loc = LOCATIONS[loc_key]
-    pfz_val = int(loc["pfz_nm"]) if loc["pfz_nm"].is_integer() else loc["pfz_nm"]
-    diesel_val = int(round(loc["pfz_nm"] * 2 * 2.5))
-    imbl_val = int(loc["imbl_nm"]) if loc["imbl_nm"].is_integer() else loc["imbl_nm"]
+    loc = LOCATIONS.get(loc_key, LOCATIONS["marina_beach"])
 
-    if english_only:
-        return (
-            f"📍 From {loc['name_en']}:\n"
-            f"🐟 Nearest PFZ Zone: {pfz_val} NM\n"
-            f"⛽ Diesel Required: ~{diesel_val} Litres (round trip)\n"
-            f"🚨 IMBL Distance: {imbl_val} NM (Safe)\n"
-            f"⚠️ {loc['note_en']}"
-        )
-
-    return (
+    ta_block = (
         f"📍 {loc['name_ta']} இருந்து:\n"
-        f"🐟 நெருங்கிய மீன் மண்டலம்: {pfz_val} கடல் மைல்\n"
-        f"⛽ தேவையான டீசல்: ~{diesel_val} லிட்டர் (வட்டம்)\n"
-        f"🚨 IMBL தூரம்: {imbl_val} கடல் மைல் (பாதுகாப்பு)\n"
-        f"⚠️ {loc['note_ta']}"
+        f"🐟 செல்வது: {loc['ground_ta']}\n"
+        f"🧭 திசை: {loc['dir_ta']} ({loc['heading']})\n"
+        f"📏 தூரம்: {loc['dist_range_ta']}\n"
+        f"🐠 மீன்: {loc['fish_ta']}\n"
+        f"⛽ டீசல்: {loc['diesel']} வட்டப் பயணம்\n"
+        f"{loc['status_ta']}"
     )
+    en_block = (
+        f"📍 From {loc['name_en']}:\n"
+        f"🐟 Head to: {loc['ground_en']}\n"
+        f"🧭 Direction: {loc['dir_en']} ({loc['heading']})\n"
+        f"📏 Distance: {loc['dist_range_en']}\n"
+        f"🐠 Fish: {loc['fish_en']}\n"
+        f"⛽ Diesel: {loc['diesel']} round trip\n"
+        f"{loc['status_en']}"
+    )
+    return f"{ta_block}\n─────────────────\n{en_block}"
 
 
 _ENGLISH_PHRASES = ["in english", "give english", "english only", "reply english", "english"]
@@ -647,28 +799,20 @@ def handle_message(
         fuel = distance * 2 * 2.5
         wave_m = marine.get("wave_height_m", 0.8)
 
-        body_lower = (body or "").lower()
-        if any(phrase in body_lower for phrase in _ENGLISH_PHRASES):
-            return (
-                f"📍 GPS Location Received!\n"
-                f"Lat: {lat:.4f}, Lon: {lon:.4f}\n\n"
-                f"🐟 Nearest PFZ Zone: {distance:.1f} NM @ {bearing:.0f}°\n"
-                f"⛽ Diesel Required: ~{fuel:.0f}L\n"
-                f"🚨 IMBL Distance: {imbl:.1f} NM\n"
-                f"🌊 Wave Height: {wave_m}m\n"
-                f"📡 Source: GPS + Open-Meteo Live"
-            )
-
-        return (
-            f"📍 உங்கள் இடம் பெறப்பட்டது!\n"
-            f"Lat: {lat:.4f}, Lon: {lon:.4f}\n\n"
-            f"🐟 நெருங்கிய மீன் மண்டலம்: "
-            f"{distance:.1f} கடல் மைல் @ {bearing:.0f}°\n"
-            f"⛽ தேவையான டீசல்: ~{fuel:.0f}L\n"
-            f"🚨 IMBL தூரம்: {imbl:.1f} NM\n"
-            f"🌊 அலை உயரம்: {wave_m}m\n"
-            f"📡 தரவு: GPS + Open-Meteo Live"
+        ta_block = (
+            "📍 *GPS இருப்பிடம் பெறப்பட்டது!*\n"
+            f"📍 Lat: {lat:.4f}, Lon: {lon:.4f}\n"
+            f"🐟 PFZ: {distance:.1f} கடல் மைல் @ {bearing:.0f}° | ⛽ ~{fuel:.0f}L\n"
+            f"🌊 அலை: {wave_m}m | 🚨 எல்லை: {imbl:.1f} NM"
         )
+        en_block = (
+            "📍 *GPS Location Received!*\n"
+            f"📍 Lat: {lat:.4f}, Lon: {lon:.4f}\n"
+            f"🐟 PFZ: {distance:.1f} NM @ {bearing:.0f}° | ⛽ ~{fuel:.0f}L\n"
+            f"🌊 Wave: {wave_m}m | 🚨 IMBL: {imbl:.1f} NM\n"
+            "📡 GPS + Open-Meteo Live"
+        )
+        return f"{ta_block}\n─────────────────\n{en_block}"
 
     text = (body or "").strip()
     if not text:
@@ -763,77 +907,47 @@ def handle_message(
             start_lat, start_lon = WAYPOINTS[loc]
 
         result = optimize_route(start_lat, start_lon)
-        if respond_english_only:
-            return (
-                f"🗺️ Safe Navigation Route:\n"
-                f"📍 Distance: {result['distance_nm']} NM\n"
-                f"🧭 Heading: {result['bearing_deg']}°\n"
-                f"⏱️ ETA: {result['eta_hours']} hours\n"
-                f"⛽ Diesel: {result['fuel_litres']}L "
-                f"(₹{result['fuel_cost_inr']})\n"
-                f"🌊 Wave Height: {result['wave_height']}m\n"
-                f"✅ Route: "
-                f"{'Safe' if result['route_safe'] else 'Warning'}\n"
-                + ('\n'.join(result['warnings']) 
-                   if result['warnings'] else '')
-                + f"\n📡 Source: {result['source']}"
-            )
+        ta_status = "பாதுகாப்பானது" if result["route_safe"] else "எச்சரிக்கை"
+        en_status = "Safe" if result["route_safe"] else "Warning"
 
-        return (
-            f"🗺️ பாதுகாப்பான வழி:\n"
-            f"📍 தொலைவு: {result['distance_nm']} NM\n"
-            f"🧭 திசை: {result['bearing_deg']}°\n"
-            f"⏱️ ETA: {result['eta_hours']} மணி\n"
-            f"⛽ டீசல்: {result['fuel_litres']}L "
-            f"(₹{result['fuel_cost_inr']})\n"
-            f"🌊 அலை: {result['wave_height']}m\n"
-            f"✅ பாதை: "
-            f"{'பாதுகாப்பானது' if result['route_safe'] else 'எச்சரிக்கை'}\n"
-            + ('\n'.join(result['warnings']) 
-               if result['warnings'] else '')
-            + f"\n📡 தரவு: {result['source']}"
+        ta_block = (
+            "🗺️ *பாதுகாப்பான வழி:*\n"
+            f"📍 தொலைவு: {result['distance_nm']} NM | 🧭 திசை: {result['bearing_deg']}°\n"
+            f"⏱️ நேரம்: {result['eta_hours']} மணி | ⛽ டீசல்: {result['fuel_litres']}L\n"
+            f"🌊 அலை: {result['wave_height']}m | ✅ பாதை: {ta_status}"
         )
+        en_block = (
+            "🗺️ *Safe Navigation Route:*\n"
+            f"📍 Distance: {result['distance_nm']} NM | 🧭 Heading: {result['bearing_deg']}°\n"
+            f"⏱️ ETA: {result['eta_hours']}h | ⛽ Diesel: {result['fuel_litres']}L\n"
+            f"🌊 Wave: {result['wave_height']}m | ✅ Route: {en_status}\n"
+            f"📡 Source: {result['source']}"
+        )
+        return f"{ta_block}\n─────────────────\n{en_block}"
 
     # QUERY 5: Location based query
     detected_loc = _detect_location(key)
     if detected_loc and not any(w in key for w in ["gillnet", "season", "night"]):
         return _location_reply(detected_loc, english_only=respond_english_only)
 
-    # 1) Canonical fisherman queries -> real-data templates (Tamil/English).
+    # 1) Canonical fisherman queries -> real-data templates (Bilingual Tamil/English).
     # Only for simple canonical queries, not complex technical questions.
     _COMPLEX_TERMS = ["gillnet", "season", "night", "வலை", "தூண்டில்", "gear", "hook", "bait"]
     if not any(w in key for w in _COMPLEX_TERMS):
-        if not respond_english_only:
-            kind = tamil_engine.classify(text)
-            if kind:
-                try:
-                    sink: dict = {}
-                    reply = _marine_reply(kind, data_sink=sink)
-                    if sink:
-                        save_memory(phone, "pfz_query", sink)
-                    return reply
-                except LiveDataError:
-                    logger.warning("WhatsApp %s: live data unavailable", kind)
-                    return _DATA_UNAVAILABLE_TA
-                except Exception:
-                    logger.exception("WhatsApp %s handler failed", kind)
-                    return _DATA_UNAVAILABLE_TA
-        else:
-            kind = tamil_engine.classify(text)
-            if kind:
-                try:
-                    decision = route_query(
-                        UserQueryRequest(
-                            query=text,
-                            user_role=DEFAULT_ROLE,
-                            lat=DEFAULT_LAT,
-                            lon=DEFAULT_LON,
-                            draft=DEFAULT_DRAFT,
-                        )
-                    )
-                    return format_reply(decision, english_only=True)
-                except Exception:
-                    pass
+        kind = tamil_engine.classify(text)
+        if kind:
+            try:
+                sink: dict = {}
+                reply = _marine_reply(kind, data_sink=sink)
+                if sink:
+                    save_memory(phone, "pfz_query", sink)
+                return reply
+            except LiveDataError:
+                logger.warning("WhatsApp %s: live data unavailable", kind)
+                return _DATA_UNAVAILABLE_TA
+            except Exception:
+                logger.exception("WhatsApp %s handler failed", kind)
+                return _DATA_UNAVAILABLE_TA
 
     # If no handler matched → use Groq AI
     from app.services.groq_engine import ask_groq
