@@ -1,0 +1,200 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Noto+Sans+Tamil:wght@400;600;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f0f9ff;
+  --card: #ffffff;
+  --text: #03045e;
+  --muted: #0077b6;
+  --border: #ade8f4;
+  --nav-bg: rgba(240, 249, 255, 0.8);
+  --shadow: 0 4px 24px rgba(0, 180, 216, 0.15);
+  --shadow-hover: 0 8px 32px rgba(0, 180, 216, 0.25);
+  --cyan-gradient: linear-gradient(135deg, #00b4d8, #06d6a0);
+}
+
+.dark {
+  --bg: #03045e;
+  --card: #023e8a;
+  --text: #caf0f8;
+  --muted: #90e0ef;
+  --border: rgba(144, 224, 239, 0.25);
+  --nav-bg: rgba(3, 4, 94, 0.8);
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  --shadow-hover: 0 8px 32px rgba(6, 214, 160, 0.2);
+  --cyan-gradient: linear-gradient(135deg, #00b4d8, #06d6a0);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), "Noto Sans Tamil", sans-serif;
+  transition: background-color 0.3s ease, color 0.3s ease;
+  min-height: 100vh;
+}
+
+/* ---------- Reusable design-system classes ---------- */
+.v-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  transition: all 0.3s ease;
+}
+
+.v-card-hover:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-hover);
+}
+
+.v-gradient-text {
+  background: var(--cyan-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.v-btn-primary {
+  background: var(--cyan-gradient);
+  color: #03045e;
+  font-weight: 700;
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+.v-btn-primary:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 8px 32px rgba(6, 214, 160, 0.4);
+  transform: translateY(-2px);
+}
+
+.v-btn-outline {
+  border: 2px solid #00b4d8;
+  color: var(--text);
+  font-weight: 600;
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  background: transparent;
+}
+
+.v-btn-outline:hover {
+  background: rgba(0, 180, 216, 0.1);
+  transform: translateY(-2px);
+}
+
+.v-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  transition: all 0.3s ease;
+}
+
+.v-input:focus {
+  outline: none;
+  border-color: #00b4d8;
+  box-shadow: 0 0 0 3px rgba(0, 180, 216, 0.2);
+}
+
+.v-muted {
+  color: var(--muted);
+}
+
+/* ---------- Hero ---------- */
+.hero-ocean {
+  background: linear-gradient(135deg, #03045e 0%, #023e8a 25%, #0077b6 55%, #00b4d8 80%, #06d6a0 100%);
+  background-size: 200% 200%;
+  animation: wave-drift 14s linear infinite alternate;
+}
+
+@keyframes wave-drift {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 100% 50%; }
+}
+
+.particle {
+  position: absolute;
+  border-radius: 9999px;
+  background: rgba(202, 240, 248, 0.6);
+  animation: float-particle 6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes float-particle {
+  0%, 100% { transform: translateY(0) translateX(0); opacity: 0.2; }
+  50% { transform: translateY(-30px) translateX(10px); opacity: 0.8; }
+}
+
+/* ---------- Ticker ---------- */
+.ticker-track {
+  display: flex;
+  width: max-content;
+  animation: ticker 30s linear infinite;
+}
+
+@keyframes ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+/* ---------- Leaflet dark styling ---------- */
+.leaflet-container {
+  background: #03045e;
+  font-family: var(--font-inter), "Noto Sans Tamil", sans-serif;
+}
+
+.leaflet-popup-content-wrapper {
+  background: var(--card);
+  color: var(--text);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.leaflet-popup-tip {
+  background: var(--card);
+}
+
+.leaflet-bar,
+.leaflet-control-layers {
+  border-radius: 8px !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(3, 4, 94, 0.7) !important;
+  color: #90e0ef !important;
+}
+
+.leaflet-control-attribution a {
+  color: #48cae4 !important;
+}
+
+/* ---------- Scrollbar ---------- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #0096c7;
+  border-radius: 8px;
+}
+
+/* ---------- Reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track,
+  .hero-ocean,
+  .particle {
+    animation: none;
+  }
+}

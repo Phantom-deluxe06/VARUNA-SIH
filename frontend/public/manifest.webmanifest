@@ -1,0 +1,18 @@
+{
+  "name": "VARUNA — Maritime Intelligence",
+  "short_name": "VARUNA",
+  "description": "Real-time fishing zones, safety advisories & IMBL alerts for Indian fishermen",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#03045E",
+  "theme_color": "#03045E",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

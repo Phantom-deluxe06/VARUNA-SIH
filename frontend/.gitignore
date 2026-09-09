@@ -1,0 +1,19 @@
+# deps
+node_modules/
+
+# next
+.next/
+out/
+next-env.d.ts
+
+# misc
+*.tsbuildinfo
+.DS_Store
+*.pem
+npm-debug.log*
+
+# local env
+.env*.local
+
+# temp helper scripts
+*.bat
