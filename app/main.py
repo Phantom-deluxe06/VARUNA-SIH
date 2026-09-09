@@ -218,17 +218,48 @@ def whatsapp_health() -> str:
 @app.post("/whatsapp")
 @app.post("/whatsapp/webhook")
 @limiter.limit("60/minute")
-async def whatsapp_webhook(
-    request: Request,
-    Body: str = Form(""),
-    From: str = Form("default"),
-    Latitude: str = Form(None),
-    Longitude: str = Form(None),
-):
-    lat = float(Latitude) if Latitude else None
-    lon = float(Longitude) if Longitude else None
+async def whatsapp_webhook(request: Request):
+    form = await request.form()
+    body = str(form.get("Body", "") or "")
+    sender = str(form.get("From", "default") or "default")
+    lat_raw = form.get("Latitude")
+    lon_raw = form.get("Longitude")
+    lat = float(lat_raw) if lat_raw else None
+    lon = float(lon_raw) if lon_raw else None
 
-    reply = handle_message(Body, From, lat, lon)
+    # Check for Twilio voice / audio attachments
+    num_media = 0
+    try:
+        num_media = int(form.get("NumMedia", 0) or 0)
+    except (ValueError, TypeError):
+        num_media = 0
+
+    if num_media > 0:
+        media_url = str(form.get("MediaUrl0", "") or "")
+        media_type = str(form.get("MediaContentType0", "") or "")
+
+        if "audio" in media_type:
+            from app.services.voice_engine import transcribe_voice
+
+            transcribed = transcribe_voice(media_url)
+            if transcribed and transcribed.strip():
+                clean_text = transcribed.strip()
+                logger.info("Voice note transcribed from %s: '%s'", sender, clean_text)
+                normal_reply = handle_message(clean_text, phone=sender, lat=lat, lon=lon)
+                reply = f"🎤 கேட்டேன்: {clean_text}\n━━━━━━━━━━━\n{normal_reply}"
+            else:
+                logger.warning("Voice note transcription failed for %s from %s", sender, media_url)
+                reply = (
+                    "🎤 குரல் தெளிவாக இல்லை.\n"
+                    "தயவுசெய்து மீண்டும் முயற்சிக்கவும்.\n"
+                    "Voice not clear. Please try again."
+                )
+
+            resp = MessagingResponse()
+            resp.message(reply)
+            return Response(content=str(resp), media_type="application/xml")
+
+    reply = handle_message(body, phone=sender, lat=lat, lon=lon)
 
     resp = MessagingResponse()
     resp.message(reply)

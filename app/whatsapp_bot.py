@@ -46,6 +46,34 @@ def whatsapp_webhook() -> Response:
         except (ValueError, TypeError):
             lon = None
 
+    num_media = 0
+    try:
+        num_media = int(request.values.get("NumMedia", 0) or 0)
+    except (ValueError, TypeError):
+        num_media = 0
+
+    if num_media > 0:
+        media_url = request.values.get("MediaUrl0", "")
+        media_type = request.values.get("MediaContentType0", "")
+
+        if "audio" in media_type:
+            from app.services.voice_engine import transcribe_voice
+
+            transcribed = transcribe_voice(media_url)
+            if transcribed and transcribed.strip():
+                clean_text = transcribed.strip()
+                app.logger.info("WhatsApp voice in from %s: '%s'", sender, clean_text)
+                normal_reply = whatsapp_core.handle_message(clean_text, phone=sender, lat=lat, lon=lon)
+                reply = f"🎤 கேட்டேன்: {clean_text}\n━━━━━━━━━━━\n{normal_reply}"
+            else:
+                app.logger.warning("WhatsApp voice transcription failed for %s from %s", sender, media_url)
+                reply = (
+                    "🎤 குரல் தெளிவாக இல்லை.\n"
+                    "தயவுசெய்து மீண்டும் முயற்சிக்கவும்.\n"
+                    "Voice not clear. Please try again."
+                )
+            return Response(whatsapp_core.twiml(reply), mimetype="application/xml")
+
     app.logger.info("WhatsApp in from %s (lat=%s, lon=%s): %s", sender, lat, lon, body)
     reply = whatsapp_core.handle_message(body, phone=sender, lat=lat, lon=lon)
     return Response(whatsapp_core.twiml(reply), mimetype="application/xml")
