@@ -1218,6 +1218,41 @@ def handle_message(
     return groq_response
 
 
+import concurrent.futures
+
+_TIMEOUT_REPLY = (
+    "🌊 VARUNA உங்கள் கோரிக்கையை செயலாக்குகிறது. சிறிது நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.\n"
+    "─────────────────\n"
+    "🌊 VARUNA is still processing your request. Please try again in a moment."
+)
+
+
+def safe_handle(
+    body: str,
+    phone: str = "default",
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    timeout: float = 8.0,
+) -> str:
+    """Run :func:`handle_message` with a hard timeout.
+
+    Twilio drops the webhook connection after ~10-15s, so a slow upstream
+    (Groq, Open-Meteo) must not block the TwiML response. On timeout or
+    failure the fisherman gets a bilingual "still working" message instead
+    of silence.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(handle_message, body, phone, lat, lon)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning("handle_message timed out after %ss for %s", timeout, phone)
+            return _TIMEOUT_REPLY
+        except Exception:
+            logger.exception("handle_message failed for %s", phone)
+            return _TIMEOUT_REPLY
+
+
 def twiml(text: str) -> str:
     """Wrap a reply string in Twilio MessagingResponse TwiML."""
     try:

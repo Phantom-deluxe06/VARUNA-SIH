@@ -63,7 +63,7 @@ def whatsapp_webhook() -> Response:
             if transcribed and transcribed.strip():
                 clean_text = transcribed.strip()
                 app.logger.info("WhatsApp voice in from %s: '%s'", sender, clean_text)
-                normal_reply = whatsapp_core.handle_message(clean_text, phone=sender, lat=lat, lon=lon)
+                normal_reply = whatsapp_core.safe_handle(clean_text, phone=sender, lat=lat, lon=lon)
                 reply = f"🎤 கேட்டேன்: {clean_text}\n━━━━━━━━━━━\n{normal_reply}"
             else:
                 app.logger.warning("WhatsApp voice transcription failed for %s from %s", sender, media_url)
@@ -75,7 +75,7 @@ def whatsapp_webhook() -> Response:
             return Response(whatsapp_core.twiml(reply), mimetype="application/xml")
 
     app.logger.info("WhatsApp in from %s (lat=%s, lon=%s): %s", sender, lat, lon, body)
-    reply = whatsapp_core.handle_message(body, phone=sender, lat=lat, lon=lon)
+    reply = whatsapp_core.safe_handle(body, phone=sender, lat=lat, lon=lon)
     return Response(whatsapp_core.twiml(reply), mimetype="application/xml")
 
 

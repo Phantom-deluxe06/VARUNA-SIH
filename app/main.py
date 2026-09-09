@@ -245,7 +245,7 @@ async def whatsapp_webhook(request: Request):
             if transcribed and transcribed.strip():
                 clean_text = transcribed.strip()
                 logger.info("Voice note transcribed from %s: '%s'", sender, clean_text)
-                normal_reply = handle_message(clean_text, phone=sender, lat=lat, lon=lon)
+                normal_reply = whatsapp_core.safe_handle(clean_text, phone=sender, lat=lat, lon=lon)
                 reply = f"🎤 கேட்டேன்: {clean_text}\n━━━━━━━━━━━\n{normal_reply}"
             else:
                 logger.warning("Voice note transcription failed for %s from %s", sender, media_url)
@@ -263,7 +263,7 @@ async def whatsapp_webhook(request: Request):
                 headers={"Content-Type": "application/xml"},
             )
 
-    reply = handle_message(body, phone=sender, lat=lat, lon=lon)
+    reply = whatsapp_core.safe_handle(body, phone=sender, lat=lat, lon=lon)
 
     resp = MessagingResponse()
     resp.message(reply)
