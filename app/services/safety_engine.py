@@ -114,3 +114,13 @@ class SafetyEngine:
             if d < best_nm:
                 best_nm = d
         return best_nm
+
+    # ── Under-Keel Clearance (UKC) with live tide height ───────────────
+    @staticmethod
+    def calculate_ukc(channel_depth: float, draft: float, tide_height: float = 0.0) -> float:
+        """Calculate dynamic Under-Keel Clearance (UKC) in meters.
+
+        Formula: UKC = (channel_depth + tide_height) - draft
+        More accurate than static channel bathymetry by incorporating real-time tidal surge.
+        """
+        return round(float((channel_depth + tide_height) - draft), 2)
