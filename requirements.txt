@@ -11,7 +11,7 @@ langchain-core
 numpy
 xarray
 netCDF4
-scikit-learn
+scikit-learn==1.4.2
 joblib
 
 # --- Realtime / AIS ingestion -------------------------------------------------

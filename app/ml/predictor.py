@@ -14,7 +14,15 @@ from __future__ import annotations
 
 import logging
 import threading
+import warnings
 from pathlib import Path
+
+from sklearn.exceptions import InconsistentVersionWarning
+
+warnings.filterwarnings(
+    "ignore", 
+    category=InconsistentVersionWarning
+)
 
 logger = logging.getLogger("varuna.ml.predictor")
 
@@ -42,6 +50,17 @@ _model = None
 _model_meta: dict = {}
 
 
+def _incois_fallback(sst: float, chl: float, sst_grad: float, chl_grad: float) -> tuple[bool, float]:
+    """Deterministic INCOIS rule-based fallback when ML model is unavailable."""
+    is_pfz = (
+        26.0 <= float(sst) <= 32.0
+        and 0.2 <= float(chl) <= 5.0
+        and (float(sst_grad) > 0.2 or float(chl_grad) > 0.1 or float(chl) > 0.5)
+    )
+    confidence = 0.85 if is_pfz else 0.55
+    return is_pfz, confidence
+
+
 def _load_model():
     """Lazily load (and cache) the trained estimator. Returns None when absent."""
     global _model, _model_meta, MODEL_PATH
@@ -56,9 +75,17 @@ def _load_model():
             return None
         import joblib
 
-        bundle = joblib.load(MODEL_PATH)
-        _model = bundle["model"] if isinstance(bundle, dict) and "model" in bundle else bundle
-        _model_meta = bundle.get("meta", {}) if isinstance(bundle, dict) else {}
+        try:
+            bundle = joblib.load(MODEL_PATH)
+            _model = bundle["model"] if isinstance(bundle, dict) and "model" in bundle else bundle
+            _model_meta = bundle.get("meta", {}) if isinstance(bundle, dict) else {}
+        except Exception as e:
+            print(f"Model load warning: {e}")
+            logger.warning("Model load warning: %s", e)
+            _model = None
+            _model_meta = {}
+            return None
+
         meta_file = MODEL_PATH.with_name(MODEL_PATH.stem + "_meta.json")
         if not meta_file.exists():
             meta_file = MODEL_PATH.with_name("pfz_model_meta.json")
@@ -123,7 +150,7 @@ def predict_pfz(
     """
     model = _load_model()
     if model is None:
-        return False, 0.0
+        return _incois_fallback(sst, chl, sst_grad, chl_grad)
 
     features = [
         [float(sst), float(chl), float(sst_grad), float(chl_grad), float(distance_to_shore_km)]
@@ -140,4 +167,4 @@ def predict_pfz(
         return is_pfz, round(confidence, 4)
     except Exception as exc:  # noqa: BLE001 - inference must never crash the engine
         logger.error("PFZ inference failed: %s", exc)
-        return False, 0.0
+        return _incois_fallback(sst, chl, sst_grad, chl_grad)
