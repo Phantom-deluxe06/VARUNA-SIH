@@ -27,3 +27,10 @@ python-dotenv
 apscheduler
 slowapi
 openai
+
+apscheduler
+slowapi
+python-dotenv
+groq
+openai-whisper
+ffmpeg-python
