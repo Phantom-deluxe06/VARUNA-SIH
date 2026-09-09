@@ -315,6 +315,156 @@ def generate_morning_advisory(lat: float = RAMESWARAM_LAT, lon: float = RAMESWAR
     return advisory
 
 
+def generate_personalized_morning_advisory(
+    name: str = "Fisherman",
+    home_port: str = "Rameswaram",
+    lat: float = RAMESWARAM_LAT,
+    lon: float = RAMESWARAM_LON,
+    gear_type: str = "Gillnet",
+    language: str = "tamil",
+) -> str:
+    """Generate port-specific, gear-specific morning advisory greeting user by name."""
+    from app.db.user_manager import resolve_gear
+    se = SafetyEngine()
+
+    # 1. Fetch live marine data for user's specific port
+    marine = get_all_marine_data(lat, lon)
+    wave = float(marine.get("wave_height_m", 0.6) or 0.6)
+    wind = float(marine.get("wind_knots", marine.get("wind_speed_knots", 8.0)) or 8.0)
+    gust = float(marine.get("gust_knots", 0) or 0)
+    sst = float(marine.get("sst_celsius", 31.0) or 31.0)
+
+    # 2. Derive tomorrow's forecast
+    forecast_waves = marine.get("forecast_waves", [])
+    if len(forecast_waves) >= 48:
+        tomorrow_wave = max(forecast_waves[24:48])
+    else:
+        tomorrow_wave = marine.get("max_wave_24h", wave)
+
+    # 3. Calculate calmest 3-hour window
+    best_time_str = "06:00 - 09:00 IST"
+    if forecast_waves and len(forecast_waves) >= 24:
+        min_w = float("inf")
+        best_hr = 0
+        for i in range(min(len(forecast_waves), 24) - 2):
+            avg = sum(forecast_waves[i:i + 3]) / 3
+            if avg < min_w:
+                min_w = avg
+                best_hr = i
+        ist_hr = (best_hr + 5) % 24
+        end_ist = (ist_hr + 3) % 24
+        best_time_str = f"{ist_hr:02d}:00-{end_ist:02d}:00 IST (~{min_w:.1f}m)"
+
+    # 4. Sea condition classification
+    if wave < 0.5 and wind < 10:
+        cond_en, cond_ta = "EXCELLENT", "மிக நல்ல நிலை"
+    elif wave < 1.0 and wind < 15:
+        cond_en, cond_ta = "GOOD", "நல்ல நிலை"
+    elif wave < 1.5 and wind < 20:
+        cond_en, cond_ta = "FAIR", "ஏற்றுக்கொள்ளக்கூடிய நிலை"
+    elif wave < 2.5 and wind < 30:
+        cond_en, cond_ta = "POOR", "மோசமான நிலை"
+    else:
+        cond_en, cond_ta = "DANGEROUS", "ஆபத்தான நிலை"
+
+    # 5. IMBL distance & regional PFZ vector
+    imbl_nm = se.imbl_distance(lat, lon)
+    imbl_status = "CRITICAL" if imbl_nm < 2 else "CAUTION" if imbl_nm < 5 else "SAFE"
+    imbl_status_ta = "ஆபத்து" if imbl_nm < 2 else "எச்சரிக்கை" if imbl_nm < 5 else "பாதுகாப்பானது"
+
+    target_lat, target_lon = PFZ_TARGET_LAT, PFZ_TARGET_LON
+    if lat >= 12.0:
+        target_lat, target_lon = 13.20, 80.45
+    elif lat <= 8.8:
+        target_lat, target_lon = 8.65, 78.40
+    elif lat >= 10.5:
+        target_lat, target_lon = 10.85, 80.15
+
+    pfz_bearing = se.calculate_bearing(lat, lon, target_lat, target_lon)
+    pfz_dist = se.haversine(lat, lon, target_lat, target_lon)
+    fuel_liters = round(pfz_dist * 2 * 2.5, 0)
+
+    # 6. Recommendation
+    if wave > 2.5 or wind > 30 or imbl_nm < 2:
+        rec_en = "🚨 DO NOT venture out to sea."
+        rec_ta = "🚨 கடலுக்குச் செல்ல வேண்டாம்."
+    elif wave > 1.5 or wind > 20 or imbl_nm < 5:
+        rec_en = "⚠️ Exercise caution. Stay close to shore."
+        rec_ta = "⚠️ எச்சரிக்கையுடன் செல்லவும். கரைக்கு அருகில் இருக்கவும்."
+    else:
+        rec_en = "✅ Safe to go fishing."
+        rec_ta = "✅ கடலுக்குச் செல்லலாம்."
+
+    gear_meta = resolve_gear(gear_type)
+    gear_name_en = gear_meta["name_en"]
+    gear_name_ta = gear_meta["name_ta"]
+    species_en = gear_meta["species_en"]
+    species_ta = gear_meta["species_ta"]
+    tip_en = gear_meta["tip_en"]
+    tip_ta = gear_meta["tip_ta"]
+
+    now_ist = datetime.now(IST_ZONE).strftime("%d-%m-%Y | 05:00 AM")
+
+    # Personalized greeting
+    greeting_ta = f"வணக்கம் {name}! இன்றைய கடல் நிலை அறிக்கை ({home_port}):"
+    greeting_en = f"Hello {name}! Today's marine advisory for {home_port}:"
+
+    gear_tip_ta = (
+        f"🐟 *{name}-ன் {gear_name_ta} படகுக்கான மீன் வழிகாட்டல்:*\n"
+        f"• உகந்த மீன்கள்: {species_ta}\n"
+        f"• குறிப்பு: {tip_ta}"
+    )
+    gear_tip_en = (
+        f"🐟 *Fish recommendation for {name}'s {gear_name_en}:*\n"
+        f"• Target species: {species_en}\n"
+        f"• Tip: {tip_en}"
+    )
+
+    if language == "english":
+        return (
+            f"🌅 *VARUNA MORNING ADVISORY*\n"
+            f"{greeting_en}\n"
+            f"📅 {now_ist} | 📍 {home_port}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌊 Weather & Sea: {cond_en}\n"
+            f"• Wave: {wave:.2f}m | Wind: {wind:.1f}kn\n"
+            f"{f'• Gust: {gust:.1f}kn\n' if gust > wind else ''}"
+            f"• Best Window: {best_time_str}\n"
+            f"• Tomorrow Wave: ~{tomorrow_wave:.2f}m\n\n"
+            f"{gear_tip_en}\n\n"
+            f"🐟 PFZ Target: {pfz_dist:.1f} NM @ {pfz_bearing:.0f}° | Fuel: ~{fuel_liters:.0f}L\n"
+            f"🚨 IMBL: {imbl_nm:.1f} NM — {imbl_status}\n"
+            f"🌡️ SST: {sst:.1f}°C\n\n"
+            f"📋 Advice: {rec_en}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📡 Live Data: Open-Meteo + Copernicus\n"
+            f"Reply *my profile* to check details or *my alerts off* to stop."
+        )
+
+    # Tamil / Bilingual
+    return (
+        f"🌅 *VARUNA காலை கடல் அறிக்கை*\n"
+        f"{greeting_ta}\n"
+        f"📅 {now_ist} | 📍 {home_port}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌊 கடல் நிலை: {cond_ta} ({cond_en})\n"
+        f"• அலை / Wave: {wave:.2f}m | காற்று / Wind: {wind:.1f}kn\n"
+        f"{f'• காற்று வேகம் / Gust: {gust:.1f}kn\n' if gust > wind else ''}"
+        f"• சிறந்த நேரம்: {best_time_str}\n"
+        f"• நாளை அலை: ~{tomorrow_wave:.2f}m\n\n"
+        f"{gear_tip_ta}\n\n"
+        f"🐟 மீன்பிடி மண்டலம் (PFZ): {pfz_dist:.1f} NM @ {pfz_bearing:.0f}° திசை | டீசல்: ~{fuel_liters:.0f}L\n"
+        f"🚨 எல்லை (IMBL): {imbl_nm:.1f} NM — {imbl_status_ta}\n"
+        f"🌡️ கடல் வெப்பநிலை (SST): {sst:.1f}°C\n\n"
+        f"📋 பரிந்துரை / Advice:\n"
+        f"{rec_ta}\n"
+        f"{rec_en}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 நேரடி தரவு: Open-Meteo + Copernicus\n"
+        f"விவரங்களை காண *my profile* அல்லது நிறுத்த *my alerts off* என அனுப்பவும்."
+    )
+
+
 def check_critical_weather(lat: float = RAMESWARAM_LAT, lon: float = RAMESWARAM_LON) -> tuple[bool, str]:
     """Check if sea condition is CRITICAL (wave > 2.5m or cyclone/extreme gust risk)."""
     try:
@@ -366,12 +516,36 @@ def check_critical_weather(lat: float = RAMESWARAM_LAT, lon: float = RAMESWARAM_
 # 4. SCHEDULED JOBS
 # ══════════════════════════════════════════════════════════════════════════════
 def run_morning_alerts() -> None:
-    """Daily 5:00 AM IST scheduled job."""
+    """Daily 5:00 AM IST scheduled job with personalized advisories."""
     logger.info("Executing daily 5:00 AM IST morning marine advisory job...")
     try:
-        advisory = generate_morning_advisory()
-        sent = broadcast_to_registered(advisory)
-        logger.info("Daily morning advisory completed. Sent to %d fishermen.", sent)
+        from app.db.user_manager import get_all_active_profiles
+        profiles = get_all_active_profiles()
+
+        sent = 0
+        if profiles:
+            for p in profiles:
+                phone = p["phone"]
+                advisory = generate_personalized_morning_advisory(
+                    name=p.get("name", "Fisherman"),
+                    home_port=p.get("home_port", "Rameswaram"),
+                    lat=p.get("vessel_lat", RAMESWARAM_LAT),
+                    lon=p.get("vessel_lon", RAMESWARAM_LON),
+                    gear_type=p.get("gear_type", "Gillnet"),
+                    language=p.get("language", "tamil"),
+                )
+                if send_whatsapp_message(phone, advisory):
+                    sent += 1
+            logger.info("Daily morning personalized advisories completed. Sent to %d/%d registered fishermen.", sent, len(profiles))
+        else:
+            # Fallback to legacy registered fishermen table if profiles empty
+            fishermen = get_registered_fishermen(active_only=True)
+            advisory = generate_morning_advisory()
+            for f in fishermen:
+                phone = f["phone"]
+                if send_whatsapp_message(phone, advisory):
+                    sent += 1
+            logger.info("Daily morning advisory completed. Sent to %d fishermen.", sent)
     except Exception as exc:
         logger.exception("Error in morning advisory scheduled job: %s", exc)
 

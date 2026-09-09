@@ -46,9 +46,18 @@ def _fast_chl(lat=9.9252, lon=79.3129, sst=None):
     }
 
 
+def _fast_sal(lat=9.9252, lon=79.3129):
+    return {
+        "salinity_psu": 34.2,
+        "salinity_score": 1.0,
+        "source": "COPERNICUS_CACHED_FAST",
+    }
+
+
 _of.get_chlorophyll = _fast_chl
 _cf.get_chlorophyll = _fast_chl
 _ag.get_chlorophyll = _fast_chl
+_of.get_salinity = _fast_sal
 
 
 
@@ -160,14 +169,19 @@ def _safety_status(wave: float, wind: float, imbl_nm: float) -> str:
     return "SAFE"
 
 
-def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
+def _marine_reply(
+    kind: str,
+    data_sink: Optional[dict] = None,
+    lat: float = DEFAULT_LAT,
+    lon: float = DEFAULT_LON,
+    port_label: str = LOCATION_LABEL,
+) -> str:
     """Build a real-data short crisp bilingual reply for one of the five canonical kinds.
 
     When ``data_sink`` is a dict, the PFZ branch fills it with the raw
     ``distance_nm`` / ``bearing`` / ``safety_status`` values so the caller
     can store them in :data:`CONVERSATION_MEMORY` for follow-up questions.
     """
-    lat, lon = DEFAULT_LAT, DEFAULT_LON
 
     if kind == "tomorrow":
         from app.data.open_meteo import get_all_marine_data
@@ -228,13 +242,13 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
         ta_block = (
             "🚨 *சர்வதேச கடல் எல்லை (IMBL)*\n"
             f"📍 தூரம்: {imbl_nm} கடல் மைல்\n"
-            "🧭 தற்போதைய இடம்: ராமேஸ்வரம்\n"
+            f"🧭 தற்போதைய இடம்: {port_label}\n"
             f"{status_ta}"
         )
         en_block = (
             "🚨 *IMBL Border Alert*\n"
             f"📍 Distance: {imbl_nm} NM\n"
-            "🧭 Current Location: Rameswaram\n"
+            f"🧭 Current Location: {port_label}\n"
             f"{status_en}\n"
             "📡 Haversine Treaty Geometry"
         )
@@ -254,9 +268,9 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
             else ("⚠️ மிதமான அலை" if wave <= 2.0 else "🚫 அதிக அலை — ஆபத்தானது")
         )
         status_en = (
-            "✅ Calm sea (SAFE)"
+            "✅ Calm seas"
             if wave <= 1.2
-            else ("⚠️ Moderate waves (CAUTION)" if wave <= 2.0 else "🚫 High waves (DANGER)")
+            else ("⚠️ Moderate waves" if wave <= 2.0 else "🚫 Rough sea — dangerous")
         )
 
         ta_block = (
@@ -308,7 +322,16 @@ def _marine_reply(kind: str, data_sink: Optional[dict] = None) -> str:
         return f"{ta_block}\n─────────────────\n{en_block}"
 
     # kind == "pfz"
-    vector = _RASTER.calculate_safe_vector(lat, lon, PFZ_TARGET_LAT, PFZ_TARGET_LON)
+    # Select local regional fishing ground target if away from Rameswaram
+    target_lat, target_lon = PFZ_TARGET_LAT, PFZ_TARGET_LON
+    if lat >= 12.0:  # Chennai / Ennore area
+        target_lat, target_lon = 13.20, 80.45
+    elif lat <= 8.8:  # Tuticorin / Kanyakumari area
+        target_lat, target_lon = 8.65, 78.40
+    elif lat >= 10.5: # Nagapattinam / Cuddalore area
+        target_lat, target_lon = 10.85, 80.15
+
+    vector = _RASTER.calculate_safe_vector(lat, lon, target_lat, target_lon)
     pfz = compute_pfz(
         md["sst_c"], md["chl_mg_m3"],
         md["sst_gradient_c_per_deg"], md["chl_gradient_mg_m3_per_deg"],
@@ -637,31 +660,31 @@ def _detect_location(key: str) -> Optional[str]:
     return None
 
 
-def _species_reply(english_only: bool = False) -> str:
-    sst = 31.1
-    chl = 1.09
-    try:
-        md = get_marine_data(DEFAULT_LAT, DEFAULT_LON)
-        if md.get("sst_c") is not None:
-            sst = round(float(md["sst_c"]), 1)
-        if md.get("chl_mg_m3") is not None:
-            chl = round(float(md["chl_mg_m3"]), 2)
-    except Exception:
-        pass
+def _species_reply(english_only: bool = False, gear: str = "Gillnet") -> str:
+    from app.db.user_manager import resolve_gear
+    g_info = resolve_gear(gear)
+    gear_en = g_info["name_en"]
+    gear_ta = g_info["name_ta"]
+    species_ta = g_info["species_ta"]
+    species_en = g_info["species_en"]
+    tip_ta = g_info.get("tip_ta", "")
+    tip_en = g_info.get("tip_en", "")
 
     ta_block = (
-        "🐟 *கிடைக்கும் மீன் வகைகள்*\n"
-        "🐠 சூரை, வஞ்சிரம், அயலை, பறக்கும் மீன்\n"
-        "🌊 ஆழம்: 20-50 மீ | பருவம்: சிறந்த காலம்\n"
-        f"🌡️ SST: {sst}°C | CHL: {chl} mg/m³"
+        f"🐟 *{gear_en}-க்கு உகந்த மீன்கள் ({gear_ta})*\n"
+        f"🐠 {species_ta}\n"
+        f"💡 குறிப்பு: {tip_ta}\n"
+        "🌊 ஆழம்: 20-50 மீ | பருவம்: சிறந்த காலம்"
     )
     en_block = (
-        "🐟 *Available Fish Species*\n"
-        "🐠 Tuna, Seer Fish, Mackerel, Flying Fish\n"
+        f"🐟 *Target Species for {gear_en}*\n"
+        f"🐠 {species_en}\n"
+        f"💡 Tip: {tip_en}\n"
         "🌊 Depth: 20-50m | Season: Peak Season\n"
-        f"🌡️ SST: {sst}°C | CHL: {chl} mg/m³\n"
-        "📡 Open-Meteo + Copernicus"
+        "📡 Open-Meteo + INCOIS"
     )
+    if english_only:
+        return en_block
     return f"{ta_block}\n─────────────────\n{en_block}"
 
 
@@ -834,55 +857,125 @@ def handle_message(
     if key in _HELP_CMDS:
         return HELP_TEXT
 
-    # ── Proactive Alerts Subscription Commands ──
-    from app.services.alert_scheduler import register_fisherman, unregister_fisherman
+    # ── Multi-Step Interactive User Registration & User Management ──
+    from app.db.user_manager import (
+        clear_session,
+        format_profile_message,
+        get_profile,
+        get_session,
+        handle_registration_step,
+        start_registration,
+        toggle_alerts,
+        update_gear,
+        update_last_active,
+        update_location,
+    )
 
-    # Command: "அலர்ட் வேண்டும்" (Tamil alert registration)
-    if any(phrase in key for phrase in ["அலர்ட் வேண்டும்", "alert vendum", "alert venum", "காலை அலர்ட்"]):
-        register_fisherman(phone=phone, language="tamil")
+    # 0) If user has an active registration session in progress, forward input to state machine
+    session = get_session(phone)
+    if session:
+        return handle_registration_step(phone, text)
+
+    # Command: "register" (Interactive 4-step registration flow)
+    if key in ("register", "subscribe", "start alerts", "பதிவு", "join alerts", "அலர்ட் வேண்டும்", "alert vendum", "alert venum"):
+        return start_registration(phone)
+
+    # Command: "my profile" / "என் விவரம்"
+    if any(key == cmd or key.startswith(cmd + " ") for cmd in ["my profile", "profile", "என் விவரம்", "என் சுயவிவரம்", "சுயவிவரம்", "விவரம்"]):
+        prof = get_profile(phone)
+        if not prof:
+            return (
+                "👤 *சுயவிவரம் இல்லை / No Profile Found*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "நீங்கள் இன்னும் பதிவு செய்யவில்லை.\n"
+                "You are not registered yet.\n\n"
+                "பதிவு செய்ய *register* என அனுப்பவும்.\n"
+                "Send *register* to setup your profile."
+            )
+        return format_profile_message(prof)
+
+    # Command: "update location" / "இடம் மாற்று"
+    if any(key.startswith(p) for p in ["update location", "இடம் மாற்று", "change location", "change port", "துறைமுகம் மாற்று"]):
+        for prefix in ["update location", "இடம் மாற்று", "change location", "change port", "துறைமுகம் மாற்று"]:
+            if key.startswith(prefix):
+                remainder = text[len(prefix):].strip(" :-=")
+                if remainder:
+                    _, msg = update_location(phone, remainder)
+                    return msg
         return (
-            "✅ *வருணா காலை அலர்ட் பதிவு செய்யப்பட்டது!*\n"
+            "📍 *துறைமுகம் மாற்ற / Update Port*\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "தினமும் காலை 5:00 மணிக்கு நேரடி கடல் வானிலை, மீன்பிடி மண்டலம் (PFZ) மற்றும் எல்லை பாதுகாப்பு எச்சரிக்கைகள் உங்கள் வாட்ஸ்அப்பிற்கு தானாக அனுப்பப்படும்.\n\n"
-            "⚠️ கடுமையான வானிலை அல்லது புயல் அபாயம் ஏற்பட்டால் உடனடி அவசர எச்சரிக்கையும் அனுப்பப்படும்.\n\n"
-            "எச்சரிக்கைகளை நிறுத்த *unregister* என அனுப்பவும்."
+            "எந்த துறைமுகத்திற்கு மாற்ற வேண்டும்?\n"
+            "உதாரணம்:\n"
+            "• *update location Chennai*\n"
+            "• *update location Tuticorin*\n"
+            "• *update location Rameswaram*\n"
+            "• *இடம் மாற்று சென்னை*"
         )
 
-    # Command: "register" (Alert registration)
-    if key in ("register", "subscribe", "start alerts", "பதிவு", "join alerts"):
-        register_fisherman(phone=phone, language="english" if respond_english_only else "tamil")
+    # Command: "update gear" / "படகு மாற்று"
+    if any(key.startswith(p) for p in ["update gear", "படகு மாற்று", "வலை மாற்று", "change gear"]):
+        for prefix in ["update gear", "படகு மாற்று", "வலை மாற்று", "change gear"]:
+            if key.startswith(prefix):
+                remainder = text[len(prefix):].strip(" :-=")
+                if remainder:
+                    _, msg = update_gear(phone, remainder)
+                    return msg
         return (
-            "✅ *VARUNA Proactive Alerts Registered!*\n"
+            "⛵ *படகு வகை மாற்ற / Update Gear*\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "You are now registered for daily morning maritime advisories at 5:00 AM IST and immediate critical weather alerts.\n\n"
-            "தினமும் காலை 5:00 மணிக்கு நேரடி கடல் அறிக்கை மற்றும் புயல் எச்சரிக்கை உங்களுக்கு அனுப்பப்படும்.\n\n"
-            "Send *unregister* anytime to unsubscribe."
+            "உங்கள் புதிய படகு வகை எது?\n"
+            "உதாரணம்:\n"
+            "• *update gear Gillnet* (கில்நெட்)\n"
+            "• *update gear Trawl* (டிரால்)\n"
+            "• *update gear Longline* (தூண்டில்)\n"
+            "• *update gear Purse Seine* (சுற்றுவலை)"
         )
 
-    # Command: "unregister" (Alert unsubscription)
-    if key in ("unregister", "stop", "unsubscribe", "cancel alerts", "பதிவு நீக்கு", "நிறுத்து"):
-        unregister_fisherman(phone=phone)
-        return (
-            "❌ *VARUNA Alerts Unsubscribed*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "நீங்கள் காலை எச்சரிக்கை சேவையிலிருந்து நீக்கப்பட்டுவிட்டீர்கள்.\n"
-            "You will no longer receive proactive morning and emergency alerts.\n\n"
-            "மீண்டும் பதிவு செய்ய *register* அல்லது *அலர்ட் வேண்டும்* என அனுப்பவும்."
-        )
+    # Command: "my alerts on" / "alerts on"
+    if key in ("my alerts on", "alerts on", "start alerts", "காலை அலர்ட் ஆன்", "அலர்ட் ஆன்"):
+        _, msg = toggle_alerts(phone, enabled=True)
+        return msg
 
-    # 0) Contextual follow-ups ("அது எவ்வளவு தூரம்" / "how far is that" ...).
+    # Command: "my alerts off" / "alerts off" / "unregister"
+    if key in ("my alerts off", "alerts off", "stop alerts", "unregister", "stop", "காலை அலர்ட் ஆஃப்", "அலர்ட் ஆஃப்", "நிறுத்து", "பதிவு நீக்கு"):
+        _, msg = toggle_alerts(phone, enabled=False)
+        return msg
+
+    # ── Load User Profile for Personalized Responses ──
+    user_prof = get_profile(phone)
+    if user_prof:
+        update_last_active(phone)
+        user_port = user_prof.get("home_port") or LOCATION_LABEL
+        user_gear = user_prof.get("gear_type") or "Gillnet"
+        user_lang = user_prof.get("language") or "tamil"
+        if lat is None and lon is None:
+            active_lat = user_prof.get("vessel_lat", DEFAULT_LAT)
+            active_lon = user_prof.get("vessel_lon", DEFAULT_LON)
+        else:
+            active_lat = lat
+            active_lon = lon
+        if user_lang == "english":
+            respond_english_only = True
+    else:
+        active_lat = lat if lat is not None else DEFAULT_LAT
+        active_lon = lon if lon is not None else DEFAULT_LON
+        user_port = LOCATION_LABEL
+        user_gear = "Gillnet"
+        user_lang = "tamil"
+
+    # Contextual follow-ups ("அது எவ்வளவு தூரம்" / "how far is that" ...).
     if _is_context_query(text):
         followup = _pfz_followup_reply(get_memory(phone))
         if followup is not None:
             return followup
-        # No PFZ context to refer to — fall through to normal classification.
 
     # -----------------------------------------------------------------------
     # Advanced Fisherman Queries (1-5)
     # -----------------------------------------------------------------------
-    # QUERY 1: Fish species detection
-    if any(t in key for t in ["which fish", "what fish", "fish type", "என்ன மீன்", "மீன் வகை", "species"]) and not any(w in key for w in ["gillnet", "net", "night", "season", "வலை", "gear"]):
-        return _species_reply(english_only=respond_english_only)
+    # QUERY 1: Fish species detection (Personalized by user gear)
+    if any(t in key for t in ["which fish", "what fish", "fish type", "என்ன மீன்", "மீன் வகை", "species"]) and not any(w in key for w in ["night", "season"]):
+        return _species_reply(english_only=respond_english_only, gear=user_gear)
 
     # QUERY 2: Fuel calculation
     if any(t in key for t in ["diesel", "fuel", "petrol", "எண்ணெய்", "எவ்வளவு எண்ணெய்", "டீசல்", "how much diesel", "fuel calculate", "எரிபொருள்"]):
@@ -900,8 +993,8 @@ def handle_message(
     if any(p in key for p in ROUTE_PATTERNS):
         from app.services.route_engine import optimize_route, WAYPOINTS
 
-        start_lat = lat if lat is not None else 9.9252
-        start_lon = lon if lon is not None else 79.3129
+        start_lat = active_lat
+        start_lon = active_lon
         loc = _detect_location(key)
         if loc and loc in WAYPOINTS and lat is None:
             start_lat, start_lon = WAYPOINTS[loc]
@@ -938,7 +1031,7 @@ def handle_message(
         if kind:
             try:
                 sink: dict = {}
-                reply = _marine_reply(kind, data_sink=sink)
+                reply = _marine_reply(kind, data_sink=sink, lat=active_lat, lon=active_lon, port_label=user_port)
                 if sink:
                     save_memory(phone, "pfz_query", sink)
                 return reply
@@ -949,10 +1042,18 @@ def handle_message(
                 logger.exception("WhatsApp %s handler failed", kind)
                 return _DATA_UNAVAILABLE_TA
 
-    # If no handler matched → use Groq AI
+    # If no handler matched → use Groq AI (enriched with user profile context)
     from app.services.groq_engine import ask_groq
 
-    groq_response = ask_groq(body)
+    if user_prof:
+        prompt_with_profile = (
+            f"[User Profile Context: Fisherman Name: {user_prof.get('name')}, "
+            f"Home Port: {user_port} (Lat: {active_lat:.4f}, Lon: {active_lon:.4f}), "
+            f"Gear: {user_gear}, Language: {user_lang}]\n{body}"
+        )
+        groq_response = ask_groq(prompt_with_profile)
+    else:
+        groq_response = ask_groq(body)
     return groq_response
 
 
