@@ -1,50 +1,42 @@
 import type { Metadata, Viewport } from "next";
-import localFont from "next/font/local";
+import { Inter, Noto_Sans_Tamil } from "next/font/google";
 import "./globals.css";
+import Providers from "@/components/Providers";
 
-const geistSans = localFont({
-  src: "./fonts/GeistVF.woff",
-  variable: "--font-geist-sans",
-  weight: "100 900",
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
 });
-const geistMono = localFont({
-  src: "./fonts/GeistMonoVF.woff",
-  variable: "--font-geist-mono",
-  weight: "100 900",
+
+const tamil = Noto_Sans_Tamil({
+  subsets: ["tamil"],
+  variable: "--font-tamil",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "VARUNA — Maritime Intelligence",
+  title: {
+    default: "VARUNA — India's Smartest Marine Intelligence",
+    template: "%s | VARUNA",
+  },
   description:
-    "Offline-first marine safety platform for Indian fishermen — PFZ, sea state and maritime-boundary advisories in Tamil and English.",
-  manifest: "/manifest.json",
-  appleWebApp: {
-    capable: true,
-    title: "VARUNA",
-    statusBarStyle: "black-translucent",
-  },
-  other: {
-    "mobile-web-app-capable": "yes",
-  },
+    "Real-time fishing zone detection, safety advisories & IMBL alerts for 8.6 million Indian fishermen — in Tamil, on WhatsApp.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "VARUNA" },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#00d4ff",
+  themeColor: "#03045E",
   width: "device-width",
   initialScale: 1,
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} bg-varuna-bg text-slate-200 antialiased`}
-      >
-        {children}
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${inter.variable} ${tamil.variable} antialiased`}>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
