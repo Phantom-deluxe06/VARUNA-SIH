@@ -1,159 +1,99 @@
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "https://varuna-sih-production.up.railway.app";
+import {
+  API_BASE_URL,
+  type AgentDecision,
+  type PfzZone,
+  type UserRole,
+  type VesselStatus,
+} from "./types";
 
-export type AlertLevel = "SAFE" | "CAUTION" | "CRITICAL";
-export type UserRole = "fisherman" | "coast_guard" | "port_pilot";
+const TIMEOUT_MS = 8000;
 
-export interface VesselStatus {
-  lat: number;
-  lon: number;
-  speed: number;
-  heading: number;
-  imbl_distance_nm: number;
-  wave_height_m: number;
-  wind_knots: number;
-  gust_knots: number;
-  wave_period_s: number;
-  sst_celsius: number;
-  ocean_current_ms: number;
-  source: string;
-  status?: AlertLevel;
-}
-
-export interface PfzZone {
-  lat: number;
-  lon: number;
-  confidence: number;
-  bearing: number;
-  distance_nm: number;
-}
-
-export interface PfzResponse {
-  zones: PfzZone[];
-  source: string;
-}
-
-export interface QueryResponse {
-  advisory_en: string;
-  advisory_ta: string;
-  alert_level: AlertLevel;
-  intent?: string;
-  marine_data?: {
-    sst_celsius?: number;
-    wave_height_m?: number;
-    wind_knots?: number;
-    [k: string]: unknown;
-  };
-  safety_data?: {
-    imbl_distance_nm?: number;
-    imbl_status?: string;
-  };
-  evidence?: string[];
-  agent_name?: string;
-  confidence?: number;
-}
-
-export class ApiError extends Error {}
-
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  let res: Response;
+async function getJSON<T>(path: string, fallback: T): Promise<T> {
   try {
-    res = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-      cache: "no-store",
-    });
-  } catch {
-    throw new ApiError("Could not reach VARUNA servers");
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const res = await fetch(`${API_BASE_URL}${path}`, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn("[VARUNA api] falling back for", path, err);
+    return fallback;
   }
-  if (!res.ok) {
-    throw new ApiError(`VARUNA API error ${res.status}`);
-  }
-  return (await res.json()) as T;
 }
 
-export function deriveStatus(s: VesselStatus): AlertLevel {
-  if (s.wave_height_m >= 2.5 || s.wind_knots >= 25 || s.imbl_distance_nm < 2) {
-    return "CRITICAL";
-  }
-  if (s.wave_height_m >= 1.5 || s.wind_knots >= 15 || s.imbl_distance_nm < 5) {
-    return "CAUTION";
-  }
-  return "SAFE";
-}
-
-export async function getVesselStatus(): Promise<VesselStatus> {
-  const data = await fetchJson<VesselStatus>("/vessel/status");
-  return { ...data, status: deriveStatus(data) };
-}
-
-export async function getPfzLatest(): Promise<PfzResponse> {
-  return fetchJson<PfzResponse>("/pfz/latest");
-}
-
-export async function postQuery(
-  query: string,
-  role: string = "fisherman",
-  vesselLat?: number,
-  vesselLon?: number,
-  draft?: number,
-): Promise<QueryResponse> {
-  const body: Record<string, unknown> = { query, role };
-  if (vesselLat != null && vesselLon != null) {
-    body.vessel_lat = vesselLat;
-    body.vessel_lon = vesselLon;
-  }
-  if (draft != null) body.vessel_draft = draft;
-  return fetchJson<QueryResponse>("/query", {
-    method: "POST",
-    body: JSON.stringify(body),
+export async function getHealth() {
+  return getJSON<{ status: string; version: string }>("/health", {
+    status: "offline",
+    version: "0",
   });
 }
 
-/** Haversine distance in nautical miles. */
-export function distanceNm(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number,
-): number {
-  const R = 3440.065; // Earth radius in NM
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
+export const FALLBACK_VESSEL: VesselStatus = {
+  lat: 9.9252,
+  lon: 79.3129,
+  speed: 0,
+  heading: 0,
+  imbl_distance_nm: 8.4,
+  wave_height_m: 1.8,
+  wind_knots: 12,
+  source: "offline",
+};
+
+export async function getVesselStatus(): Promise<VesselStatus> {
+  return getJSON<VesselStatus>("/vessel/status", FALLBACK_VESSEL);
 }
 
-/** Simplified IMBL polyline segments over Palk Strait / Bay of Bengal. */
-export const IMBL_COORDS: [number, number][] = [
-  [10.05, 80.15],
-  [9.75, 79.85],
-  [9.35, 79.55],
-  [9.0, 79.25],
-  [8.6, 78.95],
-  [8.1, 78.6],
-  [7.6, 78.2],
+export const FALLBACK_ZONES: PfzZone[] = [
+  { lat: 9.28, lon: 79.31, confidence: 0.91, bearing: 115, distance_nm: 12.3 },
+  { lat: 9.5, lon: 80.2, confidence: 0.78, bearing: 88, distance_nm: 24.7 },
 ];
 
-export function distanceToImblNm(lat: number, lon: number): number {
-  let min = Infinity;
-  for (let i = 0; i < IMBL_COORDS.length - 1; i++) {
-    const [la1, lo1] = IMBL_COORDS[i];
-    const [la2, lo2] = IMBL_COORDS[i + 1];
-    // segment-project in simple planar approx (fine at these scales)
-    const kx = Math.cos(((lat + (la1 + la2) / 2) * Math.PI) / 180);
-    const px = (lon - lo1) * kx;
-    const py = lat - la1;
-    const vx = (lo2 - lo1) * kx;
-    const vy = la2 - la1;
-    const vv = vx * vx + vy * vy;
-    const t = Math.max(0, Math.min(1, (px * vx + py * vy) / vv));
-    const cx = lo1 + (t * (lo2 - lo1));
-    const cy = la1 + t * (la2 - la1);
-    min = Math.min(min, distanceNm(lat, lon, cy, cx));
+export async function getPfzLatest(): Promise<PfzZone[]> {
+  const data = await getJSON<{ zones: PfzZone[] }>("/pfz/latest", {
+    zones: FALLBACK_ZONES,
+  });
+  return data.zones?.length ? data.zones : FALLBACK_ZONES;
+}
+
+export async function postQuery(args: {
+  query: string;
+  role: UserRole;
+  vessel_lat?: number;
+  vessel_lon?: number;
+  vessel_draft?: number;
+}): Promise<AgentDecision> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const res = await fetch(`${API_BASE_URL}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(args),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`/query -> ${res.status}`);
+    const data = await res.json();
+    const rawStatus = (data.status || data.alert_level || "SAFE").toString().toUpperCase();
+    const normalizedStatus =
+      rawStatus === "CRITICAL" ? "CRITICAL" : rawStatus === "CAUTION" ? "CAUTION" : "SAFE";
+    return {
+      ...data,
+      status: normalizedStatus,
+    } as AgentDecision;
+  } catch (err) {
+    console.warn("[VARUNA api] /query failed", err);
+    return {
+      status: "CAUTION",
+      agent_name: "VARUNA (offline)",
+      advisory_en:
+        "The VARUNA engine is unreachable. Showing cached guidance: check local sea state before sailing and stay well inside the maritime boundary.",
+      advisory_ta:
+        "வருணா இணைப்பு கிடைக்கவில்லை. சேமித்த ஆலோசனை: புறப்படும் முன் கடல் நிலையைச் சரிபார்க்கவும், எல்லைக்கோட்டிற்குள் பாதுகாப்பாக இருங்கள்.",
+      metrics: {},
+      bearing_vector: null,
+      evidence_trace: [],
+    };
   }
-  return min;
 }
