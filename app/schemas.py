@@ -56,8 +56,11 @@ class UserQueryRequest(BaseModel):
         return data
 
 
+SimpleRole = Literal["Fisherman", "Coast Guard", "Port Pilot"]
+
+
 class SimpleQueryRequest(BaseModel):
-    """Demo-friendly payload for ``POST /query``.
+    """Demo-friendly payload for ``POST /query`` with strict input validation.
 
     Accepts the shape used by the dashboard / demo tooling and adapts it to the
     canonical :class:`UserQueryRequest`. Vessel context defaults to Rameswaram
@@ -66,26 +69,43 @@ class SimpleQueryRequest(BaseModel):
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    query: str = Field(default="can I go fishing")
-    role: str = "fisherman"
-    vessel_lat: Optional[float] = None
-    vessel_lon: Optional[float] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
-    vessel_draft: Optional[float] = None
-    draft: Optional[float] = None
+    query: str = Field(default="can I go fishing", max_length=500, description="User natural language query")
+    role: SimpleRole = Field(default="Fisherman", description="Role: Fisherman, Coast Guard, Port Pilot")
+    vessel_lat: Optional[float] = Field(default=None, ge=-90, le=90, description="Vessel latitude between -90 and 90")
+    vessel_lon: Optional[float] = Field(default=None, ge=-180, le=180, description="Vessel longitude between -180 and 180")
+    lat: Optional[float] = Field(default=None, ge=-90, le=90, description="Alias for latitude")
+    lon: Optional[float] = Field(default=None, ge=-180, le=180, description="Alias for longitude")
+    vessel_draft: Optional[float] = Field(default=None, ge=0, le=30, description="Vessel draft between 0 and 30 meters")
+    draft: Optional[float] = Field(default=None, ge=0, le=30, description="Alias for vessel draft")
 
     @model_validator(mode="before")
     @classmethod
     def _normalise(cls, data: Any) -> Any:
         if isinstance(data, dict):
             data = dict(data)
+            # Map role casing/aliases to the SimpleRole Literal
+            raw_role = data.get("role")
+            if isinstance(raw_role, str):
+                cleaned = raw_role.strip().lower()
+                if cleaned in ("fisherman", "fishermen"):
+                    data["role"] = "Fisherman"
+                elif cleaned in ("coast guard", "coastguard", "disaster_officer", "disaster officer", "disaster"):
+                    data["role"] = "Coast Guard"
+                elif cleaned in ("port pilot", "port_pilot", "pilot", "port"):
+                    data["role"] = "Port Pilot"
+
             coords = data.get("coordinates")
             if isinstance(coords, dict):
                 if "lat" not in data and "vessel_lat" not in data:
                     data["lat"] = coords.get("lat")
                 if "lon" not in data and "vessel_lon" not in data:
                     data["lon"] = coords.get("lon")
+            if "vessel_lat" not in data and "lat" in data:
+                data["vessel_lat"] = data.get("lat")
+            if "vessel_lon" not in data and "lon" in data:
+                data["vessel_lon"] = data.get("lon")
+            if "vessel_draft" not in data and "draft" in data:
+                data["vessel_draft"] = data.get("draft")
         return data
 
     def to_user_query(self) -> "UserQueryRequest":

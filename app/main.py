@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import json
 import logging
 import sys
@@ -8,9 +11,12 @@ if hasattr(sys.stdout, "reconfigure"):
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 logger = logging.getLogger("varuna.main")
 
@@ -65,12 +71,16 @@ async def lifespan(app: FastAPI):
     stop_scheduler()
 
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="VARUNA Core Engine",
     description="Offline-first hybrid intelligence engine - Marine Operational System (MOS)",
     version="3.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,7 +129,8 @@ def handle_query(req: UserQueryRequest):
 
 
 @app.post("/query")
-def handle_simple_query(req: SimpleQueryRequest = SimpleQueryRequest()):
+@limiter.limit("30/minute")
+async def handle_simple_query(request: Request, req: SimpleQueryRequest = SimpleQueryRequest()):
     """Live marine query endpoint — LangGraph multi-agent orchestration."""
     result = process_query(
         query=req.query,
@@ -206,7 +217,9 @@ def whatsapp_health() -> str:
 
 @app.post("/whatsapp")
 @app.post("/whatsapp/webhook")
+@limiter.limit("60/minute")
 async def whatsapp_webhook(
+    request: Request,
     Body: str = Form(""),
     From: str = Form("default"),
     Latitude: str = Form(None),

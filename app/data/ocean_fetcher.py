@@ -118,6 +118,13 @@ def get_salinity(lat: float, lon: float) -> dict:
 
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=2)
+        cop_kwargs = {}
+        c_user = os.environ.get("COPERNICUSMARINE_SERVICE_USERNAME")
+        c_pass = os.environ.get("COPERNICUSMARINE_SERVICE_PASSWORD")
+        if c_user and c_pass:
+            cop_kwargs["username"] = c_user
+            cop_kwargs["password"] = c_pass
+
         ds = copernicusmarine.open_dataset(
             dataset_id="cmems_mod_glo_phy-so_anfc_0.083deg_P1D-m",
             minimum_latitude=lat - 0.5,
@@ -127,6 +134,7 @@ def get_salinity(lat: float, lon: float) -> dict:
             start_datetime=start.strftime("%Y-%m-%dT00:00:00"),
             end_datetime=end.strftime("%Y-%m-%dT23:59:59"),
             variables=["so"],
+            **cop_kwargs,
         )
         so_vals = ds["so"].values
         so_mean = float(np.nanmean(so_vals))
@@ -177,6 +185,13 @@ def _copernicus_chlorophyll(lat: float, lon: float) -> dict:
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=4)
+    cop_kwargs = {}
+    c_user = os.environ.get("COPERNICUSMARINE_SERVICE_USERNAME")
+    c_pass = os.environ.get("COPERNICUSMARINE_SERVICE_PASSWORD")
+    if c_user and c_pass:
+        cop_kwargs["username"] = c_user
+        cop_kwargs["password"] = c_pass
+
     ds = copernicusmarine.open_dataset(
         dataset_id="cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D",
         minimum_latitude=lat - 2,
@@ -186,6 +201,7 @@ def _copernicus_chlorophyll(lat: float, lon: float) -> dict:
         start_datetime=start.strftime("%Y-%m-%dT%H:%M:%S"),
         end_datetime=end.strftime("%Y-%m-%dT%H:%M:%S"),
         variables=["CHL"],
+        **cop_kwargs,
     )
     chl = ds["CHL"].values
     chl_mean = float(np.nanmean(chl))
