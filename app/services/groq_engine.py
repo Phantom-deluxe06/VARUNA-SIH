@@ -4,11 +4,11 @@ from groq import Groq
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 
 def get_groq_client() -> Groq:
-    key = os.getenv("GROQ_API_KEY", GROQ_API_KEY)
+    key = os.environ.get("GROQ_API_KEY", GROQ_API_KEY)
     if not key:
         raise ValueError("GROQ_API_KEY environment variable is not set")
     return Groq(api_key=key)

@@ -21,6 +21,9 @@ from app.services.intelligence_engine import route_query
 from app.services.raster_service import RasterEngine
 from app.services.varuna_graph import process_query
 from app import demo_mode, whatsapp_core
+from app.whatsapp_core import handle_message
+from twilio.twiml.messaging_response import MessagingResponse
+
 
 # Shared stateless raster engine (mirrors app.agents.RASTER).
 RASTER = RasterEngine()
@@ -180,8 +183,28 @@ def vessel_status() -> dict:
     }
 
 
+@app.get("/whatsapp")
+def whatsapp_health() -> str:
+    return "VARUNA WhatsApp bot is running. Point the Twilio sandbox webhook here (POST)."
+
+
+@app.post("/whatsapp")
 @app.post("/whatsapp/webhook")
-def whatsapp_webhook(Body: str = Form(""), From: str = Form("default")) -> Response:
-    """Twilio WhatsApp webhook (same logic as the standalone Flask bot)."""
-    reply = whatsapp_core.handle_message(Body, phone=From)
-    return Response(content=whatsapp_core.twiml(reply), media_type="application/xml")
+async def whatsapp_webhook(
+    Body: str = Form(""),
+    From: str = Form("default"),
+    Latitude: str = Form(None),
+    Longitude: str = Form(None),
+):
+    lat = float(Latitude) if Latitude else None
+    lon = float(Longitude) if Longitude else None
+
+    reply = handle_message(Body, From, lat, lon)
+
+    resp = MessagingResponse()
+    resp.message(reply)
+    return Response(
+        content=str(resp),
+        media_type="application/xml",
+    )
+

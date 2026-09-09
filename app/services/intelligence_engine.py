@@ -101,6 +101,59 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Sub-intent detection — multi-intent queries need multiple agents.
+# ---------------------------------------------------------------------------
+MULTI_INTENT_TRIGGERS: dict[str, list[str]] = {
+    "tomorrow": ["weather", "safety", "fishing"],
+    "plan trip": ["weather", "safety", "fishing"],
+    "safe to fish": ["weather", "safety", "fishing"],
+    "where and safe": ["fishing", "safety", "weather"],
+    "is it safe": ["weather", "safety"],
+    "போகலாமா": ["weather", "safety"],
+    "நாளைக்கு": ["weather", "safety", "fishing"],
+    "safe-ஆ": ["weather", "safety"],
+}
+
+
+def detect_sub_intents(query: str) -> list[str]:
+    """Detect all applicable intents for a query (multi-intent support).
+
+    Returns a list of intent strings. If a trigger phrase is matched in
+    ``MULTI_INTENT_TRIGGERS``, those intents are returned. Otherwise, all
+    pattern-matched intents from ``INTENT_KEYWORDS`` are returned.
+    """
+    q = (query or "").lower()
+    if not q:
+        return ["situational"]
+
+    # Check multi-intent trigger phrases first
+    for trigger, intents in MULTI_INTENT_TRIGGERS.items():
+        if trigger in q:
+            return intents
+
+    # Fall back to all matching pattern groups
+    matched: list[str] = []
+    for intent, patterns in INTENT_KEYWORDS.items():
+        if any(pat in q for pat in patterns):
+            matched.append(intent)
+
+    # Also check the split intent groups individually
+    if not matched:
+        if any(pat in q for pat in SAFETY_PATTERNS):
+            matched.append("safety")
+        if any(pat in q for pat in WEATHER_PATTERNS):
+            matched.append("weather")
+        if any(pat in q for pat in TOMORROW_PATTERNS):
+            matched.append("tomorrow")
+        if any(pat in q for pat in FISHING_PATTERNS):
+            matched.append("fishing")
+        if any(pat in q for pat in BORDER_PATTERNS):
+            matched.append("border")
+
+    return matched if matched else ["situational"]
+
+
+# ---------------------------------------------------------------------------
 # Layer 2 — fuzzy lexicon + canonical examples.
 # ---------------------------------------------------------------------------
 SYNONYM_LEXICON: list[tuple[str, str]] = [
